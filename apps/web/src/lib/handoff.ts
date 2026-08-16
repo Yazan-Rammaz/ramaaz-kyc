@@ -36,6 +36,49 @@ export interface HandoffClaims {
     /** Unique token id, for single-use enforcement. */
     jti?: string;
     iss?: string;
+    /**
+     * Ordered capture stages the client must run, e.g. ["face","id","liveness"].
+     * Optional — the face-only flow has no need for it.
+     *
+     * This belongs in the signed token rather than the URL because it decides
+     * which compliance checks happen. A ?steps= parameter could be edited to
+     * drop liveness; a signed claim cannot.
+     *
+     * Only stages exist here. What gets COMPARED afterwards (live↔ID,
+     * live↔enrolled) and at what threshold is NestJS policy — the client never
+     * acts on it, so it is deliberately not signed into this token.
+     */
+    steps?: string[];
+}
+
+/** Stages this build knows how to run. */
+const KNOWN_STEPS = ['face', 'id', 'liveness'] as const;
+export type KnownStep = (typeof KNOWN_STEPS)[number];
+
+/**
+ * Reads the `steps` claim from an already-verified token.
+ *
+ * Safe to decode without re-verifying ONLY because the caller obtained this
+ * token from the httpOnly session cookie, which the `start` route of each flow
+ * writes only after a successful signature check. Never call this on a token
+ * taken straight off the wire.
+ *
+ * Unknown stage names are dropped rather than trusted: a token asking for a step
+ * this build cannot render must not silently become a shorter journey that still
+ * reports success.
+ */
+export function readStepsClaim(token: string): KnownStep[] {
+    try {
+        const payload = token.split('.')[1];
+        if (!payload) return [];
+        const claims = JSON.parse(bytesToUtf8(b64urlToBytes(payload))) as HandoffClaims;
+        const raw = Array.isArray(claims.steps) ? claims.steps : [];
+        return raw.filter((s): s is KnownStep =>
+            (KNOWN_STEPS as readonly string[]).includes(s),
+        );
+    } catch {
+        return [];
+    }
 }
 
 export type VerifyResult =
