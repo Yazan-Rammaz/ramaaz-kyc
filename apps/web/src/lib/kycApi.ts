@@ -1,3 +1,4 @@
+import type { AnalyzeIdResult } from '@ramaaz/kyc-shared/types/analyze-id';
 import type { ReverifyPayload, ReverifyResult, ReverifySession } from '@/types/reverify';
 
 /**
@@ -26,6 +27,33 @@ async function post<T>(path: string, body: unknown): Promise<{ res: Response; da
     });
     const data = (await res.json().catch(() => ({}))) as Partial<T>;
     return { res, data };
+}
+
+/**
+ * Runs OCR and validation over one captured side of a document.
+ *
+ * Throws only on transport/HTTP failure. A document that is unreadable, the
+ * wrong side, or shown on a screen comes back as a normal 200 with
+ * `status: 'error'` and a `code` — those are expected outcomes of the capture
+ * loop, not exceptions, and the caller retries on the next frame.
+ *
+ * `sessionHint` groups the front and back captures of one document together so
+ * the server can cross-check that the back belongs to the same card.
+ */
+export async function analyzeId(
+    imageData: string,
+    side: 'front' | 'back',
+    sessionHint = 'default',
+): Promise<AnalyzeIdResult> {
+    const { res, data } = await post<AnalyzeIdResult & { error?: string }>('/analyze-id', {
+        imageData,
+        side,
+        sessionHint,
+    });
+    if (!res.ok && !data.status) {
+        throw new Error(data.error ?? `Analyze ID failed: ${res.status}`);
+    }
+    return data as AnalyzeIdResult;
 }
 
 /**

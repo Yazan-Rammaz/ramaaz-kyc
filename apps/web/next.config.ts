@@ -19,7 +19,12 @@ const nextConfig: NextConfig = {
             "img-src 'self' data: blob:",
             "font-src 'self' data:",
             "media-src 'self' blob:",
-            "connect-src 'self' https:",
+            // `data:` is required by opencv.js, which fetches its own WASM from an
+            // embedded data: URI. Omitting it cost hours in rdb: OpenCV silently
+            // fails to initialise, the document scanner never emits corners, and ID
+            // capture sits on "Card detected — scanning…" forever because a
+            // *different* (Sobel) detector drives that status text and keeps working.
+            "connect-src 'self' data: https:",
             "worker-src 'self' blob:",
             "child-src 'self' blob:",
             'upgrade-insecure-requests',

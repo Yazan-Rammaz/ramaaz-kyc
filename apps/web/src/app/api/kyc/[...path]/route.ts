@@ -22,7 +22,14 @@ import { readSessionToken } from '@/lib/session';
 const WORKER_BASE = process.env.KYC_WORKER_BASE_URL ?? '';
 
 /** Endpoints this proxy is willing to relay. Anything else is refused. */
-const ALLOWED_PATHS = new Set(['reverify/start', 'reverify/verify', 'reverify/credentials']);
+const ALLOWED_PATHS = new Set([
+    // Face re-verification (step-up)
+    'reverify/start',
+    'reverify/verify',
+    'reverify/credentials',
+    // Enrollment: document capture
+    'analyze-id',
+]);
 
 async function forward(req: NextRequest, path: string[]) {
     // Order matters: route and session checks run BEFORE the upstream-config

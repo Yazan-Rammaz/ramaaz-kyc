@@ -28,6 +28,14 @@ export type {
     MatchResult,
 } from './types/verification';
 
+export type {
+    AnalyzeIdStatus,
+    AnalyzeIdCode,
+    AnalyzeIdNextStep,
+    AnalyzeIdResult,
+    ExtractedIdData,
+} from './types/analyzeId';
+
 export {
     idConfig,
     faceConfig,
