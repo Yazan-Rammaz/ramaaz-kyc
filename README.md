@@ -30,32 +30,38 @@ Here, both stay exactly where they already work.
 
 ## Status
 
-Phase 1 — face re-verification only.
-
 | Flow | State |
 |---|---|
-| Face re-verification (step-up) | ✅ implemented |
-| ID capture + OCR | ⏳ still in rdb |
-| Liveness challenge | ⏳ still in rdb |
-| Face ↔ ID match | ⏳ still in rdb |
-| Worker API | ⏳ still in the rdb monorepo; proxied from here |
+| Face re-verification (step-up) | ✅ working — verified end to end against the deployed Worker |
+| ID capture + OCR | ✅ ported — builds and renders |
+| Liveness challenge (3 poses) | ✅ ported — builds and renders |
+| Face ↔ ID match + submit | ⛔ blocked — see the integration spec |
+| Worker API | ✅ here, deployed as `ramaaz-kyc` |
 
-The Worker (`packages/kyc-server` in rdb) is deliberately **not** moved yet. This
-app forwards `/api/kyc/*` to it, so the extraction is verifiable end to end
-without touching the backend, AWS credentials, or NestJS.
+Enrollment captures correctly but **cannot complete a submit** until NestJS
+accepts hand-off tokens. rdb therefore still runs its own copy of enrollment;
+its KYC removal was attempted and reverted for exactly this reason.
+
+Not yet ported: the standalone `face` step used at the start of a root-style
+journey. It renders a visible placeholder rather than being skipped — a missing
+compliance check must be loud.
 
 ---
 
 ## Layout
 
 ```
-apps/web/                     Next.js app — the hosted flow
-  src/app/verify/face/        the face re-verification route
-  src/app/api/kyc/[...path]/  proxy → KYC Worker
-  src/components/face/        FaceVerifyFlow, FaceScanOverlay
-  src/hooks/useCamera.ts      camera access + frame capture
-  src/lib/kycApi.ts           Worker client
-  src/lib/returnTo.ts         return-URL allowlist
+apps/web/                       Next.js app — the hosted flow
+  src/app/verify/face/          face re-verification (step-up)
+  src/app/verify/enroll/        enrollment: intro → ID → liveness → match
+  src/app/api/kyc/[...path]/    proxy → KYC Worker (allowlisted routes only)
+  src/components/verification/  the 7 flow screens
+  src/context/                  EnrollFlowContext — token-driven step order
+  src/hooks/                    camera + CV (OpenCV scanner, MediaPipe)
+  src/workers/                  document scanner (OpenCV, off the main thread)
+  public/vendor/                self-hosted opencv.js + MediaPipe WASM
+packages/api/                   Cloudflare Worker — AWS + NestJS
+packages/shared/                types + kycConfig both halves agree on
 ```
 
 ---
