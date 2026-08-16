@@ -1,5 +1,11 @@
-name = "rdb-kyc-worker"
+name = "ramaaz-kyc"
 main = "src/index.ts"
+
+# The OAuth token can see three Ramaaz accounts, so wrangler cannot pick one on
+# its own and a non-interactive deploy fails. Pinned to the account that already
+# hosts rdb-kyc-worker (subdomain yazan-adnof), so this Worker is a sibling of
+# the existing deployment rather than landing somewhere else.
+account_id = "725421c06cddc0ed4694b7cd177ae60e"
 # Matches the previously-working KYC worker. The newer workerd runtime implements
 # the Node APIs the AWS SDK needs (e.g. process.report) and runs the KYC image
 # pipeline — the old 2024-09-23 date used the legacy unenv polyfill that threw
@@ -40,7 +46,7 @@ KYC_TRANSLATE_ARABIC_NAMES = "true"
 #   wrangler secret put KYC_SHARED_SECRET --env production
 
 [env.production]
-name = "rdb-kyc-worker"
+name = "ramaaz-kyc-production"
 [env.production.vars]
 ENVIRONMENT = "production"
 RDB_BASE_URL = "https://trydos_wallet_develop.ramaaz.dev"

@@ -46,7 +46,10 @@ async function forward(req: NextRequest, path: string[]) {
         return Response.json({ error: 'KYC_WORKER_BASE_URL is not configured' }, { status: 503 });
     }
 
-    const target = `${WORKER_BASE.replace(/\/$/, '')}/kyc/${joined}${req.nextUrl.search}`;
+    // The Worker mounts its routes at /api/kyc (see packages/api/src/index.ts:
+    // app.route('/api/kyc', kycRoutes)), NOT /kyc. Getting this wrong yields a
+    // silent 404 that looks like a missing endpoint rather than a bad prefix.
+    const target = `${WORKER_BASE.replace(/\/$/, '')}/api/kyc/${joined}${req.nextUrl.search}`;
 
     const headers = new Headers();
     const ct = req.headers.get('content-type');
