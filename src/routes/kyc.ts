@@ -5,7 +5,7 @@ import type { Env } from '../index';
 import { backendFetch } from '../lib/backendFetch';
 import { getOpenAI } from '../lib/openai';
 import { postSignedToNest, patchSignedToNest } from '../lib/kycSigning';
-import { compareConfig, faceConfig, idConfig } from '@ramaaz/kyc-shared/config';
+import { compareConfig, faceConfig, idConfig } from '../config/kycConfig';
 import type { AnalyzeIdResult, AnalyzeIdCode } from '../services/kyc/kycService.interface';
 
 export const kycRoutes = new Hono<{ Bindings: Env }>();

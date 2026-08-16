@@ -1,4 +1,4 @@
-import type { LivenessResult, IDDocument, MatchResult } from '@ramaaz/kyc-shared/types';
+import type { LivenessResult, IDDocument, MatchResult } from '../../types/verification';
 
 export type LivenessChallenge = 'look_straight' | 'turn_right' | 'turn_left';
 
