@@ -23,8 +23,8 @@ endpoints with its own user's access token, which already works. The cost is tha
 the camera and computer-vision layer is rebuilt per project rather than shared.
 
 If that trade stops making sense — a third or fourth consumer, say — the hosted
-flow is recoverable from git history, and `docs/NESTJS_HANDOFF_SPEC.md` describes
-the backend work it needs.
+flow and the spec for the backend work it needed are both recoverable from git
+history.
 
 ---
 
