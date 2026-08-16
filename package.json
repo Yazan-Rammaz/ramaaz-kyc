@@ -14,7 +14,7 @@
     "build:api": "npm -w @ramaaz/kyc-server run build",
     "deploy:api": "npm -w @ramaaz/kyc-server run deploy",
     "deploy:api:production": "npm -w @ramaaz/kyc-server run deploy:production",
-    "typecheck": "npm -w @ramaaz/kyc-web run typecheck && npm -w @ramaaz/kyc-server run typecheck"
+    "typecheck": "npm -w @ramaaz/kyc-shared run typecheck && npm -w @ramaaz/kyc-web run typecheck && npm -w @ramaaz/kyc-server run typecheck"
   },
   "devDependencies": {
     "concurrently": "^10.0.1"

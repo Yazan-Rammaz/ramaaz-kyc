@@ -12,6 +12,7 @@
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"
   },
   "dependencies": {
+    "@ramaaz/kyc-shared": "*",
     "@aws-sdk/client-rekognition": "^3.1037.0",
     "@aws-sdk/client-sts": "^3.1038.0",
     "@aws-sdk/client-textract": "^3.1037.0",

@@ -190,6 +190,20 @@ export const idConfig = {
         smoothingAlpha: 0.4,
         /** Safety margin from frame edges; detections inside this margin are rejected. */
         boundaryMarginPx: 5,
+        /**
+         * Interior content gate — how "busy" the inside of a detected quad must be
+         * before it counts as a real document rather than a blank rectangle
+         * (a book, a monitor, a sheet of paper). Lower to accept sparser cards,
+         * raise if empty rectangles still pass.
+         *   front — has photo + dense text/MRZ, so a higher bar is safe.
+         *   back  — can be sparse (a little text / one barcode), so a lower bar.
+         *
+         * Client-only: the browser scanner enforces these; the Worker never reads
+         * them. They live here so there is a single kycConfig rather than a
+         * client copy that drifts from the server copy.
+         */
+        minInteriorDensityFront: 0.06,
+        minInteriorDensityBack: 0.03,
     },
 
     // ── Back-side cross-verification (Levenshtein) ────────────────────────────

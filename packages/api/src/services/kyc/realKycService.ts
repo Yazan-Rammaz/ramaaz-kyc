@@ -25,7 +25,7 @@ import {
     DecodeHintType,
     BarcodeFormat,
 } from '@zxing/library';
-import { idConfig, faceConfig } from '../../config/kycConfig';
+import { idConfig, faceConfig } from '@ramaaz/kyc-shared/config';
 import { looksLikeSyrianId, parseSyrianId } from './syrianIdParser';
 import { looksLikeTurkishId, parseTurkishId } from './turkishIdParser';
 import { looksLikeLebaneseId, parseLebaneseId } from './lebaneseIdParser';
