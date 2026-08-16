@@ -15,6 +15,9 @@
  * keeping two — until then, changes here need mirroring in rdb.
  */
 
+/** Head pose the user is asked to hold during the liveness challenge. */
+export type LivenessChallenge = 'look_straight' | 'turn_right' | 'turn_left';
+
 export interface LivenessMetrics {
     yaw: number;
     pitch: number;

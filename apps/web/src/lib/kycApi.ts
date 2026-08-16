@@ -1,4 +1,5 @@
 import type { AnalyzeIdResult } from '@ramaaz/kyc-shared/types/analyze-id';
+import type { LivenessChallenge, LivenessResult } from '@ramaaz/kyc-shared/types';
 import type { ReverifyPayload, ReverifyResult, ReverifySession } from '@/types/reverify';
 
 /**
@@ -27,6 +28,33 @@ async function post<T>(path: string, body: unknown): Promise<{ res: Response; da
     });
     const data = (await res.json().catch(() => ({}))) as Partial<T>;
     return { res, data };
+}
+
+/**
+ * Scores one captured frame of the liveness challenge.
+ *
+ * `crop` asks the server to return a tight face crop, which becomes the selfie
+ * carried into face-match. The response's `faceImageData` falls back to the
+ * frame we sent when the server returns no crop — downstream matching always
+ * needs a usable image, and silently passing `undefined` would fail much later
+ * and much less obviously.
+ */
+export async function detectFace(
+    faceImageData: string,
+    challengeStep: LivenessChallenge = 'look_straight',
+    options: { crop?: boolean } = {},
+): Promise<LivenessResult> {
+    const { res, data } = await post<LivenessResult & { error?: string }>('/liveness', {
+        faceImageData,
+        challengeStep,
+        crop: options.crop,
+    });
+    // A rejected pose comes back 200 with isLive:false — only transport failures
+    // throw, so the capture loop can keep polling frames.
+    if (!res.ok && data.isLive === undefined) {
+        throw new Error(data.error ?? `Liveness failed: ${res.status}`);
+    }
+    return { ...data, faceImageData: data.faceImageData ?? faceImageData } as LivenessResult;
 }
 
 /**

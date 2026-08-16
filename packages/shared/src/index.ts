@@ -21,6 +21,7 @@
  */
 
 export type {
+    LivenessChallenge,
     LivenessMetrics,
     LivenessResult,
     IDDocument,

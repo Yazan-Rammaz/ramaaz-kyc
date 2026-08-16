@@ -27,8 +27,9 @@ const ALLOWED_PATHS = new Set([
     'reverify/start',
     'reverify/verify',
     'reverify/credentials',
-    // Enrollment: document capture
+    // Enrollment: document capture + liveness challenge
     'analyze-id',
+    'liveness',
 ]);
 
 async function forward(req: NextRequest, path: string[]) {

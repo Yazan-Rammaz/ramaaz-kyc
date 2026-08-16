@@ -3,6 +3,7 @@
 import React, { useCallback } from 'react';
 import { EnrollFlowProvider, useEnrollFlow, type EnrollStep } from '@/context/EnrollFlowContext';
 import IDCaptureScreen from '@/components/verification/screens/IDCaptureScreen';
+import AwsFaceLivenessScreen from '@/components/verification/screens/AwsFaceLiveness';
 
 /**
  * Enrollment flow shell.
@@ -25,13 +26,13 @@ function Stage({ onSettle }: { onSettle: (outcome: 'passed' | 'failed', reason?:
     switch (phase) {
         case 'id':
             return <IDCaptureScreen onExit={exit} />;
+        case 'liveness':
+            return <AwsFaceLivenessScreen onExit={exit} />;
 
-        // Ported in a later commit. Advancing past them here would let a flow
-        // claim steps ran that never did, so they block instead.
+        // Ported in a later commit. Advancing past it here would let a flow
+        // claim a step ran that never did, so it blocks instead.
         case 'face':
             return <NotPorted step="face check" onSkip={completeStep} />;
-        case 'liveness':
-            return <NotPorted step="liveness" onSkip={completeStep} />;
 
         case 'submitting':
             return <Centered>Submitting your verification…</Centered>;
