@@ -1,38 +1,57 @@
 import { NextRequest } from 'next/server';
+import { readSessionToken } from '@/lib/session';
 
 /**
  * Proxy for /api/kyc/* → the KYC Worker.
  *
  * Phase 1 deliberately does NOT move the Worker. It stays deployed where it is
  * and this app forwards to it, so the extraction can be verified end to end
- * without touching the backend, the AWS credentials, or NestJS. Moving the
- * Worker into this repo is a later, independent step.
+ * without touching the backend, the AWS credentials, or NestJS.
  *
- * Keeping the browser same-origin (rather than calling the Worker directly from
- * the client) means no CORS preflight on every capture, and the Worker's origin
- * stays out of the client bundle.
+ * ─── Identity ───────────────────────────────────────────────────────────────
+ * Identity comes from the httpOnly session cookie set by /verify/face/start,
+ * NOT from headers the browser supplied. The Worker accepts a Bearer token and
+ * reads `sub` from its payload, so the verified hand-off token is attached here.
+ *
+ * Client-supplied Authorization / Cookie headers are deliberately NOT forwarded.
+ * Doing so would let a caller present any token they liked and have this service
+ * launder it into a Worker call — the proxy would become an open relay to the
+ * KYC backend. Whatever the browser sends is ignored; only the cookie counts.
  */
 
 const WORKER_BASE = process.env.KYC_WORKER_BASE_URL ?? '';
 
+/** Endpoints this proxy is willing to relay. Anything else is refused. */
+const ALLOWED_PATHS = new Set(['reverify/start', 'reverify/verify', 'reverify/credentials']);
+
 async function forward(req: NextRequest, path: string[]) {
-    if (!WORKER_BASE) {
-        return Response.json(
-            { error: 'KYC_WORKER_BASE_URL is not configured' },
-            { status: 503 },
-        );
+    // Order matters: route and session checks run BEFORE the upstream-config
+    // check. Testing configuration first would make a misconfigured deployment
+    // answer 503 to unauthenticated calls — masking whether the auth gate works
+    // at all, and reporting "service down" where the honest answer is 401.
+    const joined = path.join('/');
+    // An allowlist rather than a passthrough: this app currently implements one
+    // flow, so relaying arbitrary /kyc/* routes (submit, status, complete) would
+    // expose surface it has no session model for yet. Extend deliberately.
+    if (!ALLOWED_PATHS.has(joined)) {
+        return Response.json({ error: 'Not found' }, { status: 404 });
     }
 
-    const target = `${WORKER_BASE.replace(/\/$/, '')}/kyc/${path.join('/')}${req.nextUrl.search}`;
+    const session = await readSessionToken();
+    if (!session) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    if (!WORKER_BASE) {
+        return Response.json({ error: 'KYC_WORKER_BASE_URL is not configured' }, { status: 503 });
+    }
+
+    const target = `${WORKER_BASE.replace(/\/$/, '')}/kyc/${joined}${req.nextUrl.search}`;
 
     const headers = new Headers();
     const ct = req.headers.get('content-type');
     if (ct) headers.set('content-type', ct);
-    // Forward the caller's credentials so the Worker can authorise the challenge.
-    const auth = req.headers.get('authorization');
-    if (auth) headers.set('authorization', auth);
-    const cookie = req.headers.get('cookie');
-    if (cookie) headers.set('cookie', cookie);
+    headers.set('authorization', `Bearer ${session}`);
 
     const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.text();
 
