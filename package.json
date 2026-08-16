@@ -7,9 +7,17 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm -w apps/web run dev",
-    "build": "npm -w apps/web run build",
-    "typecheck": "npm -w apps/web run typecheck"
+    "dev": "concurrently -n api,web -c yellow,green \"npm -w @ramaaz/kyc-server run dev\" \"npm -w @ramaaz/kyc-web run dev\"",
+    "dev:web": "npm -w @ramaaz/kyc-web run dev",
+    "dev:api": "npm -w @ramaaz/kyc-server run dev",
+    "build": "npm -w @ramaaz/kyc-web run build",
+    "build:api": "npm -w @ramaaz/kyc-server run build",
+    "deploy:api": "npm -w @ramaaz/kyc-server run deploy",
+    "deploy:api:production": "npm -w @ramaaz/kyc-server run deploy:production",
+    "typecheck": "npm -w @ramaaz/kyc-web run typecheck && npm -w @ramaaz/kyc-server run typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.1"
   },
   "engines": {
     "node": ">=20"

@@ -1,0 +1,48 @@
+name = "rdb-kyc-worker"
+main = "src/index.ts"
+# Matches the previously-working KYC worker. The newer workerd runtime implements
+# the Node APIs the AWS SDK needs (e.g. process.report) and runs the KYC image
+# pipeline — the old 2024-09-23 date used the legacy unenv polyfill that threw
+# "process.report.getReport is not implemented yet".
+compatibility_date = "2026-03-06"
+compatibility_flags = ["nodejs_compat"]
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+
+[vars]
+ENVIRONMENT = "development"
+RDB_BASE_URL = "https://trydos_wallet_develop.ramaaz.dev"
+AWS_REGION = "us-east-1"
+AWS_MOCK = "false"
+OPENAI_TRANSLATION_MODEL = "gpt-4o-mini"
+KYC_TRANSLATE_ARABIC_NAMES = "true"
+
+# NOTE: the HeyGen / Simli avatar vars that lived here were NOT carried over.
+# They configured the video-interview KYC step, whose frontend was deleted from
+# rdb — the /heygen-token, /simli-* and /verify-video routes in src/routes/kyc.ts
+# now have no caller. Those routes should be removed; until then they are inert.
+#
+# HEYGEN_API_KEY was committed here in plaintext, so it is in rdb's git history.
+# ROTATE IT. Anything genuinely secret belongs in `wrangler secret`, never [vars]
+# — [vars] is plaintext config that ships with the Worker and lands in git.
+
+# Secrets — set via dashboard or:
+#   wrangler secret put AWS_ACCESS_KEY_ID --env production
+#   wrangler secret put AWS_SECRET_ACCESS_KEY --env production
+#   wrangler secret put OPENAI_API_KEY --env production
+#   wrangler secret put KYC_WEBHOOK_SECRET --env production
+#   wrangler secret put KYC_INTERNAL_SECRET --env production
+#   wrangler secret put KYC_SHARED_SECRET --env production
+
+[env.production]
+name = "rdb-kyc-worker"
+[env.production.vars]
+ENVIRONMENT = "production"
+RDB_BASE_URL = "https://trydos_wallet_develop.ramaaz.dev"
+AWS_REGION = "us-east-1"
+AWS_MOCK = "false"

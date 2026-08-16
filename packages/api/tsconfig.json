@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    // "node" is required as well as the Workers types: the KYC image pipeline
+    // uses Buffer and process, which resolve at runtime via the nodejs_compat
+    // compatibility flag in wrangler.toml. Without it tsc reports Buffer/process
+    // as undefined even though the Worker runs fine — the package had no
+    // typecheck script before, so this never surfaced.
+    "types": ["@cloudflare/workers-types", "node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    },
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*", "cloudflare-env.d.ts"]
+}

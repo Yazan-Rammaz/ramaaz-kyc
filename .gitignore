@@ -12,3 +12,5 @@ out/
 next-env.d.ts
 .history/
 *.local
+.dev.vars
+.dev.vars.*
