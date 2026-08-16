@@ -1,0 +1,10 @@
+node_modules/
+.next/
+.open-next/
+dist/
+out/
+*.log
+.env
+.env.local
+.wrangler/
+.DS_Store

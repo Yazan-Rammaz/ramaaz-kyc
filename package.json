@@ -1,0 +1,17 @@
+{
+  "name": "ramaaz-kyc",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm -w apps/web run dev",
+    "build": "npm -w apps/web run build",
+    "typecheck": "npm -w apps/web run typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
