@@ -118,6 +118,12 @@ is an open redirect that hands verification outcomes to whoever crafted the link
 
 ---
 
+## Integration spec
+
+Before a consumer can use the hosted enrollment flow, NestJS must accept hand-off
+tokens on three endpoints. See [docs/NESTJS_HANDOFF_SPEC.md](docs/NESTJS_HANDOFF_SPEC.md)
+— that work is the only thing blocking hosted enrollment today.
+
 ## Open decisions
 
 **How does this app authenticate the user?** Currently it forwards the incoming
