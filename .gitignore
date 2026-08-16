@@ -8,3 +8,5 @@ out/
 .env.local
 .wrangler/
 .DS_Store
+*.tsbuildinfo
+next-env.d.ts
