@@ -1,5 +1,10 @@
 import type { AnalyzeIdResult } from '@ramaaz/kyc-shared/types/analyze-id';
-import type { LivenessChallenge, LivenessResult } from '@ramaaz/kyc-shared/types';
+import type { LivenessChallenge, LivenessResult, MatchResult } from '@ramaaz/kyc-shared/types';
+import type {
+    KycSession,
+    SubmitVerificationPayload,
+    SubmitVerificationResult,
+} from '@ramaaz/kyc-shared/types/submit';
 import type { ReverifyPayload, ReverifyResult, ReverifySession } from '@/types/reverify';
 
 /**
@@ -28,6 +33,65 @@ async function post<T>(path: string, body: unknown): Promise<{ res: Response; da
     });
     const data = (await res.json().catch(() => ({}))) as Partial<T>;
     return { res, data };
+}
+
+/**
+ * Compares the live face against the photo cropped from the document.
+ *
+ * Returns a similarity score and an advisory verdict. This is NOT the decision —
+ * the score is submitted to NestJS, which decides approve/review/reject. A
+ * client-side verdict would be trivially bypassable.
+ */
+export async function matchFaceToID(faceData: string, idData: string): Promise<MatchResult> {
+    const { res, data } = await post<
+        MatchResult & { similarity?: number; confidence?: number; error?: string }
+    >('/face-match', { idFaceImageData: idData, liveFaceImageData: faceData });
+    if (!res.ok && data.isMatch === undefined) {
+        throw new Error(data.error ?? `Face match failed: ${res.status}`);
+    }
+    return {
+        isMatch: !!data.isMatch,
+        // The Worker sends `similarity` as 0–100 and may omit `confidence`.
+        confidence:
+            typeof data.confidence === 'number' ? data.confidence : (data.similarity ?? 0) / 100,
+        similarity: data.similarity,
+        verdict: data.verdict,
+        errorMessage: data.errorMessage ?? null,
+    };
+}
+
+/**
+ * Opens a KYC session.
+ *
+ * Single-use: NestJS consumes it on the first submit, even one it rejects. A
+ * retry therefore needs a fresh session, or the resubmit fails as "already
+ * consumed".
+ */
+export async function startSession(): Promise<KycSession> {
+    const { res, data } = await post<KycSession & { error?: string }>('/session', {});
+    if (!res.ok || !data.sessionId) {
+        throw new Error(data.error ?? `Session start failed: ${res.status}`);
+    }
+    return data as KycSession;
+}
+
+/**
+ * Submits the captured artifacts for a decision.
+ *
+ * Throws on any non-2xx: unlike the capture calls, there is no "expected
+ * failure" here — a submit either reaches NestJS or it did not happen, and
+ * silently treating a failure as a pass would be the worst possible bug in this
+ * flow.
+ */
+export async function submitVerification(
+    payload: SubmitVerificationPayload,
+): Promise<SubmitVerificationResult> {
+    const { res, data } = await post<SubmitVerificationResult & { error?: string }>(
+        '/submit',
+        payload,
+    );
+    if (!res.ok) throw new Error(data.error ?? `Submit failed: ${res.status}`);
+    return data as SubmitVerificationResult;
 }
 
 /**

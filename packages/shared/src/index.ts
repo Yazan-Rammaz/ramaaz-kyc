@@ -37,6 +37,13 @@ export type {
     ExtractedIdData,
 } from './types/analyzeId';
 
+export type {
+    KycRequest,
+    SubmitVerificationPayload,
+    SubmitVerificationResult,
+    KycSession,
+} from './types/submit';
+
 export {
     idConfig,
     faceConfig,

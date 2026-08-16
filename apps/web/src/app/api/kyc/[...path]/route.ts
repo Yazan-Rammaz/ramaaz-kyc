@@ -30,6 +30,9 @@ const ALLOWED_PATHS = new Set([
     // Enrollment: document capture + liveness challenge
     'analyze-id',
     'liveness',
+    'face-match',
+    'session',
+    'submit',
 ]);
 
 async function forward(req: NextRequest, path: string[]) {

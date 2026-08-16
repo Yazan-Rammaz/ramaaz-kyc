@@ -44,10 +44,16 @@ interface EnrollFlowValue {
     idDocument: IDDocument | null;
     livenessResult: LivenessResult | null;
     matchResult: MatchResult | null;
+    /**
+     * Single-use session for the submit call. NestJS consumes it on the first
+     * submit — even a rejected one — so a retry must fetch a fresh one.
+     */
+    kycSessionId: string | null;
 
     setIdDocument: (doc: IDDocument | null) => void;
     setLivenessResult: (r: LivenessResult | null) => void;
     setMatchResult: (r: MatchResult | null) => void;
+    setKycSessionId: (id: string | null) => void;
 
     /** Finish the current stage and advance; past the last stage → 'submitting'. */
     completeStep: () => void;
@@ -77,6 +83,7 @@ export function EnrollFlowProvider({
     const [idDocument, setIdDocument] = useState<IDDocument | null>(null);
     const [livenessResult, setLivenessResult] = useState<LivenessResult | null>(null);
     const [matchResult, setMatchResult] = useState<MatchResult | null>(null);
+    const [kycSessionId, setKycSessionId] = useState<string | null>(null);
 
     // Counts are refs, not state: bumping an attempt must not re-render a screen
     // mid-capture. rdb's version used state and returned a stale count from
@@ -85,9 +92,13 @@ export function EnrollFlowProvider({
 
     const completeStep = useCallback(() => {
         setDirection(1);
+        // Past the last capture stage the flow enters 'submitting' (face match +
+        // submit to NestJS); completing THAT reaches 'done'. Without this second
+        // hop, a successful submit would re-enter 'submitting' and loop.
+        setTerminal((t) => (t === 'submitting' ? 'done' : t));
         setIndex((i) => {
             const next = i + 1;
-            if (next >= steps.length) setTerminal('submitting');
+            if (next >= steps.length) setTerminal((t) => t ?? 'submitting');
             return next;
         });
     }, [steps.length]);
@@ -121,9 +132,11 @@ export function EnrollFlowProvider({
             idDocument,
             livenessResult,
             matchResult,
+            kycSessionId,
             setIdDocument,
             setLivenessResult,
             setMatchResult,
+            setKycSessionId,
             completeStep,
             failToSupport,
             goBack,
@@ -137,6 +150,7 @@ export function EnrollFlowProvider({
             idDocument,
             livenessResult,
             matchResult,
+            kycSessionId,
             completeStep,
             failToSupport,
             goBack,

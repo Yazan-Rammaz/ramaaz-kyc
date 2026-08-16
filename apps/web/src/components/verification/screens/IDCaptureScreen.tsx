@@ -115,7 +115,7 @@ export default function IDCaptureScreen({ onExit }: { onExit: () => void }) {
     // (`goTo('id-summary')`), which hardcoded the journey into every screen.
     // Here the screen only reports that its stage finished and the flow — driven
     // by the token's `steps` — decides what comes next.
-    const { setIdDocument, completeStep } = useEnrollFlow();
+    const { setIdDocument } = useEnrollFlow();
     const {
         videoRef,
         canvasRef,
@@ -491,12 +491,14 @@ export default function IDCaptureScreen({ onExit }: { onExit: () => void }) {
                     expiryDate: srcData.expiryDate,
                     rawText: srcData.rawText,
                 };
-                setIdDocument(fullDoc);
-                // Stage finished — the flow advances to whatever the token lists next.
                 setPollState('done');
                 setStatusText('Passport Captured!');
                 stopCamera();
-                setTimeout(() => completeStep(), 800);
+                // Hand the document to the flow only after the confirmation
+                // message has been seen. Setting it immediately would swap in the
+                // summary screen mid-message. The summary owns advancing the stage —
+                // capture does not call completeStep(), or the review would be skipped.
+                setTimeout(() => setIdDocument(fullDoc), 800);
                 return;
             }
 
@@ -535,14 +537,16 @@ export default function IDCaptureScreen({ onExit }: { onExit: () => void }) {
                 expiryDate: front?.expiryDate,
                 rawText: front?.rawText,
             };
-            setIdDocument(fullDoc);
-            // Stage finished — the flow advances to whatever the token lists next.
             setPollState('done');
             setStatusText('ID Capture Complete!');
             stopCamera();
-            setTimeout(() => completeStep(), 800);
+            // Hand the document to the flow only after the confirmation
+            // message has been seen. Setting it immediately would swap in the
+            // summary screen mid-message. The summary owns advancing the stage —
+            // capture does not call completeStep(), or the review would be skipped.
+            setTimeout(() => setIdDocument(fullDoc), 800);
         },
-        [getDetectedDocumentLabel, completeStep, setIdDocument, stopCamera],
+        [getDetectedDocumentLabel, setIdDocument, stopCamera],
     );
 
     const handleCaptureClick = useCallback(async () => {
