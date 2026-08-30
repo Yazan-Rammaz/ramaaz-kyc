@@ -361,44 +361,99 @@ async function livenessCredentials(
   }
 
   try {
-    const { STSClient, GetFederationTokenCommand } = await import('@aws-sdk/client-sts');
-    const sts = new STSClient({ region, credentials: { accessKeyId, secretAccessKey } });
-    const out = await sts.send(
-      new GetFederationTokenCommand({
-        // 2–32 chars. Appears in CloudTrail as the federated principal, so it
-        // is worth being recognisable.
-        Name: 'kyc-face-liveness',
-        DurationSeconds: 900,
-        Policy: JSON.stringify({
-          Version: '2012-10-17',
-          Statement: [
-            {
-              Effect: 'Allow',
-              Action: ['rekognition:StartFaceLivenessSession'],
-              // The streaming API carries its session id in the request, not in
-              // an ARN, so there is no narrower resource to name. The session id
-              // is the second lock: minted server-side, and single use.
-              Resource: '*',
-            },
-          ],
-        }),
-      }),
-    );
+    // ── Signed by hand, because STS speaks XML and workerd has no DOM ───────
+    //
+    // `@aws-sdk/client-sts` cannot run here. Rekognition is a JSON protocol and
+    // deserialises fine; STS is a query protocol that answers in XML, and in a
+    // Worker the bundler resolves the SDK's *browser* build, whose XML
+    // deserialiser wants DOM globals. Polyfilling them is a losing game — it
+    // asked for `DOMParser`, then for `Node`, and each round costs a deploy to
+    // discover the next one. The failure also disguises itself: a
+    // `ReferenceError` wrapped in "Deserialization error", arriving as a plain
+    // 500 AFTER AWS has already issued the credentials, which reads exactly
+    // like a permissions problem and is not one.
+    //
+    // So this signs the request itself. `aws4fetch` is SigV4 built for Workers
+    // — WebCrypto, no Node shims, a few KB — and the response is small enough
+    // that four regexes beat pulling in an XML parser.
+    const { AwsClient } = await import('aws4fetch');
+    const aws = new AwsClient({ accessKeyId, secretAccessKey, region, service: 'sts' });
 
-    const cred = out.Credentials;
-    if (!cred?.AccessKeyId || !cred.SecretAccessKey || !cred.SessionToken) {
+    const policy = JSON.stringify({
+      Version: '2012-10-17',
+      Statement: [
+        {
+          Effect: 'Allow',
+          Action: ['rekognition:StartFaceLivenessSession'],
+          // The streaming API carries its session id in the request, not in an
+          // ARN, so there is no narrower resource to name. The session id is
+          // the second lock: minted server-side, and single use.
+          Resource: '*',
+        },
+      ],
+    });
+
+    const body = new URLSearchParams({
+      Action: 'GetFederationToken',
+      Version: '2011-06-15',
+      // 2–32 chars. Appears in CloudTrail as the federated principal, so it is
+      // worth being recognisable.
+      Name: 'kyc-face-liveness',
+      DurationSeconds: '900',
+      Policy: policy,
+    });
+
+    const res = await aws.fetch(`https://sts.${region}.amazonaws.com/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+    const xml = await res.text();
+
+    if (!res.ok) {
+      // STS puts a machine-readable <Code> in its error body. Surfacing that
+      // beats a bare 500 — AccessDenied and InvalidClientTokenId call for
+      // completely different fixes.
+      const code = /<Code>([^<]+)<\/Code>/.exec(xml)?.[1] ?? `HTTP ${res.status}`;
+      console.error('[liveness] STS refused:', code);
+      return c.json({ error: 'Could not issue liveness credentials', code }, 500);
+    }
+
+    const pick = (tag: string) =>
+      new RegExp(`<${tag}>([^<]+)</${tag}>`).exec(xml)?.[1];
+    const accessKey = pick('AccessKeyId');
+    const secret = pick('SecretAccessKey');
+    const sessionToken = pick('SessionToken');
+    const expiration = pick('Expiration');
+
+    if (!accessKey || !secret || !sessionToken) {
+      console.error('[liveness] STS response missing credentials');
       return c.json({ error: 'STS did not return credentials' }, 500);
     }
 
     return c.json({
-      accessKeyId: cred.AccessKeyId,
-      secretAccessKey: cred.SecretAccessKey,
-      sessionToken: cred.SessionToken,
-      expiration: cred.Expiration?.toISOString(),
+      accessKeyId: accessKey,
+      secretAccessKey: secret,
+      sessionToken,
+      expiration,
     });
   } catch (err) {
     console.error('[liveness] STS federation failed', err);
-    return c.json({ error: 'Could not issue liveness credentials' }, 500);
+    // The AWS error NAME comes back with the 500 — `AccessDenied`,
+    // `InvalidClientTokenId`, `ValidationError`. A name is a fact about
+    // configuration, not a secret, and without it this endpoint fails
+    // identically for a missing IAM permission, a wrong key and a deserialiser
+    // that cannot run in workerd. That ambiguity already cost two deploys.
+    // The message is deliberately not included: it can quote request contents.
+    const code = err instanceof Error ? err.name : 'UnknownError';
+    // For a ReferenceError or TypeError the message is "X is not defined" —
+    // a fact about this runtime, not about the request — so it is safe to
+    // return and is the only thing that identifies which global is missing.
+    // AWS service errors keep their message hidden: those can quote request
+    // contents.
+    const detail =
+      err instanceof ReferenceError || err instanceof TypeError ? err.message : undefined;
+    return c.json({ error: 'Could not issue liveness credentials', code, detail }, 500);
   }
 }
 

@@ -17,6 +17,7 @@
     "@aws-sdk/client-textract": "^3.1037.0",
     "@cf-wasm/photon": "^0.3.6",
     "@zxing/library": "^0.22.0",
+    "aws4fetch": "^1.0.20",
     "hono": "^4.6.0",
     "openai": "^6.35.0",
     "simli-client": "3.0.1"
