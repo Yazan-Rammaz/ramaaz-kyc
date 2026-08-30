@@ -71,6 +71,16 @@ export interface AnalyzeIdDocumentResult {
     extracted: {
         idType?: string;
         country?: string;
+        /**
+         * ISO 3166-1 alpha-3 country code, when one could be determined.
+         *
+         * This is the value a backend should resolve against its own country
+         * table. `country` above is a DISPLAY name derived from it and is
+         * lossy — a passport MRZ reads "SYRIAN ARAB REPUBLIC" where a database
+         * row is called "Syria", and matching those by string is a coin flip.
+         * The code is unambiguous and is what the extractor actually computed.
+         */
+        countryIso3?: string;
         name?: string;
         firstName?: string;
         lastName?: string;
@@ -908,6 +918,8 @@ interface MrzNames {
     firstName?: string;
     lastName?: string;
     country?: string;
+    /** ISO-3 straight off MRZ line 1, positions 2–4. */
+    countryIso3?: string;
 }
 
 /**
@@ -950,7 +962,8 @@ function parseMrzNames(rawText: string): MrzNames | null {
     };
     const country = ISO3_NAME[iso3] ?? iso3;
 
-    return { firstName, lastName, country };
+    // Both: the code for backends to resolve, the name for humans to read.
+    return { firstName, lastName, country, countryIso3: iso3 };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1044,18 +1057,24 @@ export async function analyzeIdDocument(
     // Priority: (1) MRZ ISO-3 code, (2) extractCountry from rawText phrases,
     // (3) Textract COUNTY/PLACE_OF_BIRTH as last resort.
     let country: string | undefined;
+    let countryIso3: string | undefined;
     if (mrzNames?.country) {
         country = mrzNames.country;
-        console.log(`[realKycService] country from MRZ: ${country}`);
+        countryIso3 = mrzNames.countryIso3;
+        console.log(`[realKycService] country from MRZ: ${country} (${countryIso3})`);
     } else if (rawText) {
         const hit = extractCountry(rawText);
         if (hit) {
             country = hit.name;
+            countryIso3 = hit.iso3;
             console.log(
                 `[realKycService] country recovered from rawText via ${hit.via}: ${hit.name} (${hit.iso3})`,
             );
         }
     }
+    // The Textract fallback below yields a bare string with no code — leaving
+    // countryIso3 undefined is correct there, and tells the backend to fall
+    // back to name matching rather than trusting a guessed code.
     if (!country) {
         country = getField(fields, 'COUNTY') || getField(fields, 'PLACE_OF_BIRTH');
     }
@@ -1087,6 +1106,7 @@ export async function analyzeIdDocument(
         idType: idTypeRaw,
         idName: idTypeRaw,
         country,
+        countryIso3,
         name: fullName,
         firstName,
         lastName,
@@ -1263,6 +1283,7 @@ export async function analyzeIdDocument(
                     extracted: {
                         idType: 'PASSPORT',
                         country: mrzRescue?.country ?? standardExtracted.country,
+                        countryIso3: mrzRescue?.countryIso3 ?? standardExtracted.countryIso3,
                         name: rescueName ?? standardExtracted.name,
                         firstName: mrzRescue?.firstName ?? standardExtracted.firstName,
                         lastName: mrzRescue?.lastName ?? standardExtracted.lastName,

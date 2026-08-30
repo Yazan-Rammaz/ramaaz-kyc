@@ -73,6 +73,15 @@ export interface AnalyzeIdResult {
         idType: string;
         idName: string;
         country: string;
+        /**
+         * ISO 3166-1 alpha-3 code for `country`, when one was determined.
+         *
+         * This is what a backend should resolve against its own country table.
+         * `country` is a display name derived from it and is lossy — a passport
+         * MRZ reads "SYRIAN ARAB REPUBLIC" where a table row says "Syria".
+         * Absent when the country came from a Textract fallback with no code.
+         */
+        countryIso3?: string;
         name: string;
         nationalNumber: string;
         birthday: string;

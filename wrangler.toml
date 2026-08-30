@@ -22,7 +22,24 @@ enabled = true
 
 [vars]
 ENVIRONMENT = "development"
-RDB_BASE_URL = "https://trydos_wallet_develop.ramaaz.dev"
+
+# ── The tenant registry ─────────────────────────────────────────────────────
+# Every product this Worker serves, keyed by the `X-Ramaaz-Tenant` header (no
+# header → "rdb", so existing clients are unaffected). Plaintext config, so it
+# holds base URLs, cookie names and CORS origins — and NO secrets.
+#
+# Adding a product is ONE entry here plus two secrets. No code change:
+#
+#   wrangler secret put KYC_SHARED_SECRET_<ID>
+#   wrangler secret put KYC_INTERNAL_SECRET_<ID>
+#
+# RDB keeps its existing unsuffixed KYC_SHARED_SECRET / KYC_INTERNAL_SECRET, so
+# nothing about that deployment needs re-provisioning.
+#
+# ⚠️ Every tenant backend must speak the SAME contract — same paths, shapes and
+# auth. Only the ORDER in which a product's own flow calls them may differ, and
+# order lives in the backend because this Worker keeps no state between calls.
+TENANTS = '''{"rdb":{"baseUrl":"https://trydos_wallet_develop.ramaaz.dev","cookies":{"access":"rdb_at","step":"rdb_step"},"origins":["https://ramaaz-digital-bank.online","https://dev.ramaaz-digital-bank.online","https://new.ramaaz-digital-bank.online","https://api.ramaaz-digital-bank.online","http://localhost:3000","https://localhost:3000"]},"root":{"baseUrl":"https://staging-backend.ramaaz.store/v1","cookies":{"access":"root_at","step":"root_challenge"},"origins":["https://canroot.yazan-adnof.workers.dev","https://ramaaz-root.yazan-adnof.workers.dev","http://localhost:3002"]}}'''
 AWS_REGION = "us-east-1"
 AWS_MOCK = "false"
 OPENAI_TRANSLATION_MODEL = "gpt-4o-mini"
@@ -49,6 +66,7 @@ KYC_TRANSLATE_ARABIC_NAMES = "true"
 name = "ramaaz-kyc-production"
 [env.production.vars]
 ENVIRONMENT = "production"
-RDB_BASE_URL = "https://trydos_wallet_develop.ramaaz.dev"
 AWS_REGION = "us-east-1"
 AWS_MOCK = "false"
+# Envs do not inherit the top-level [vars], so the registry is repeated.
+TENANTS = '''{"rdb":{"baseUrl":"https://trydos_wallet_develop.ramaaz.dev","cookies":{"access":"rdb_at","step":"rdb_step"},"origins":["https://ramaaz-digital-bank.online","https://dev.ramaaz-digital-bank.online","https://new.ramaaz-digital-bank.online","https://api.ramaaz-digital-bank.online","http://localhost:3000","https://localhost:3000"]},"root":{"baseUrl":"https://staging-backend.ramaaz.store/v1","cookies":{"access":"root_at","step":"root_challenge"},"origins":["https://canroot.yazan-adnof.workers.dev","https://ramaaz-root.yazan-adnof.workers.dev","http://localhost:3002"]}}'''

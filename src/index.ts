@@ -1,20 +1,30 @@
 import { Hono } from 'hono';
 import { kycRoutes } from './routes/kyc';
+import { allowedOrigins, tenantReport } from './lib/tenant';
 
 export type Env = {
     ENVIRONMENT: string;
-    RDB_BASE_URL: string;
+
+    /**
+     * ── The tenant registry ─────────────────────────────────────────────────
+     * JSON: `{ "<id>": { baseUrl, cookies?, origins? }, … }`. Plaintext config,
+     * so it holds NO secrets — those are looked up by convention as
+     * `KYC_SHARED_SECRET_<ID>` / `KYC_INTERNAL_SECRET_<ID>`, with RDB keeping
+     * its existing unsuffixed names.
+     *
+     * Adding a product is one entry here plus two secrets. Never read a base
+     * URL or a secret directly in a route — resolve them together through
+     * `lib/tenant.ts`, which is what stops one tenant's URL being paired with
+     * another's signing key.
+     */
+    TENANTS: string;
     AWS_REGION: string;
     AWS_ACCESS_KEY_ID: string;
     AWS_SECRET_ACCESS_KEY: string;
     AWS_SESSION_TOKEN?: string;
     AWS_MOCK: string;
     OPENAI_API_KEY: string;
-    HEYGEN_API_KEY: string;
-    NEXT_PUBLIC_HEYGEN_AVATAR_ID: string;
-    SIMLI_API_KEY: string;
-    SIMLI_FACE_ID: string;
-    NEXT_PUBLIC_SIMLI_FACE_ID: string;
+    // HeyGen / Simli bindings were dropped with the video-interview routes.
     KYC_WEBHOOK_SECRET: string;
     KYC_SHARED_SECRET: string;
     KYC_INTERNAL_SECRET: string;
@@ -22,18 +32,18 @@ export type Env = {
     OPENAI_TRANSLATION_MODEL: string;
 };
 
-const ALLOWED_ORIGINS = [
-    'https://ramaaz-digital-bank.online',
-    'https://dev.ramaaz-digital-bank.online',
-    'https://new.ramaaz-digital-bank.online',
-    'https://api.ramaaz-digital-bank.online',
-    'http://localhost:3000',
-    'https://localhost:3000',
-];
-
-function isAllowedOrigin(origin: string | null): boolean {
+/**
+ * Allowed browser origins, per tenant, from the registry.
+ *
+ * A preflight carries `Origin` but NOT our tenant header — custom headers are
+ * what it is asking permission for — so the check has to be against the union
+ * of every tenant's origins rather than one tenant's. That is not a weakening:
+ * CORS decides which page may read a response, and the tenant still decides
+ * which backend and which keys are used.
+ */
+function isAllowedOrigin(origin: string | null, env: Env): boolean {
     if (!origin) return false;
-    if (ALLOWED_ORIGINS.includes(origin)) return true;
+    if (allowedOrigins(env).includes(origin)) return true;
     if (/^https:\/\/[a-z0-9-]+\.pages\.dev$/.test(origin)) return true;
     if (/^https:\/\/[a-z0-9-]+\.ramaaz-digital-bank\.pages\.dev$/.test(origin)) return true;
     return false;
@@ -41,26 +51,35 @@ function isAllowedOrigin(origin: string | null): boolean {
 
 const app = new Hono<{ Bindings: Env }>();
 
-if (typeof process !== 'undefined' && process.env) {
-    console.log('[worker] process.env:', process.env);
-}
+// ⚠️ REMOVED: `console.log('[worker] process.env:', process.env)`.
+//
+// With nodejs_compat and a modern compatibility_date, `process.env` carries the
+// Worker's SECRETS — AWS keys, the OpenAI key, KYC_WEBHOOK_SECRET,
+// KYC_SHARED_SECRET, KYC_INTERNAL_SECRET. This line printed all of them in
+// full, on every isolate start, into Cloudflare observability logs (enabled
+// above in wrangler.toml). Never log `process.env` or `c.env` wholesale.
 
 app.use('*', async (c, next) => {
     const origin = c.req.header('Origin') ?? null;
-    const allowed = isAllowedOrigin(origin);
+    const allowed = isAllowedOrigin(origin, c.env);
 
     if (c.req.method === 'OPTIONS') {
-        return new Response(null, {
-            status: 204,
-            headers: {
-                'Access-Control-Allow-Origin': allowed && origin ? origin : '',
-                'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
-                'Access-Control-Allow-Headers':
-                    'Content-Type, Authorization, X-KYC-Webhook-Secret, X-Step-Token',
-                'Access-Control-Allow-Credentials': 'true',
-                'Access-Control-Max-Age': '86400',
-            },
-        });
+        const preflight: Record<string, string> = {
+            'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers':
+                'Content-Type, Authorization, X-KYC-Webhook-Secret, X-Step-Token, X-Ramaaz-Tenant',
+            'Access-Control-Max-Age': '86400',
+        };
+        // Omit the origin headers entirely when the origin is not allowed. An
+        // empty `Access-Control-Allow-Origin: ''` is a malformed value rather
+        // than a denial, so the browser reports a confusing CORS parse error
+        // instead of the plain "this origin is not allowed" the developer needs.
+        if (allowed && origin) {
+            preflight['Access-Control-Allow-Origin'] = origin;
+            preflight['Access-Control-Allow-Credentials'] = 'true';
+            preflight['Vary'] = 'Origin';
+        }
+        return new Response(null, { status: 204, headers: preflight });
     }
 
     await next();
@@ -72,39 +91,44 @@ app.use('*', async (c, next) => {
     }
 });
 
-// Debug logger: Cloudflare observability captures request metadata + console output
-// only — NOT request/response bodies. This logs each /api/kyc/* response body
-// (truncated) and timing so failures are visible in the dashboard ("View invocation"
-// or filter level=error). Remove or gate behind ENVIRONMENT once debugging is done.
+// Request logger. Cloudflare observability captures console output, so this is
+// what makes a failing call visible in the dashboard ("View invocation", or
+// filter level=error).
 app.use('/api/kyc/*', async (c, next) => {
     const started = Date.now();
     const path = new URL(c.req.url).pathname;
     await next();
-    try {
-        const clone = c.res.clone();
-        const ct = clone.headers.get('content-type') ?? '';
-        let preview: string;
-        if (ct.includes('json') || ct.includes('text')) {
-            const text = await clone.text();
-            preview = text.length > 2000 ? `${text.slice(0, 2000)}…(+${text.length - 2000})` : text;
-        } else {
-            preview = `<${ct || 'binary'} ${clone.headers.get('content-length') ?? '?'}b>`;
-        }
-        console.log(
-            `[kyc] ${c.req.method} ${path} → ${c.res.status} (${Date.now() - started}ms) ${preview}`,
-        );
-    } catch (err) {
-        console.log(`[kyc] ${c.req.method} ${path} → ${c.res.status} (response log failed: ${String(err)})`);
-    }
+    // Size and status only — NEVER the body. Liveness and face-compare
+    // responses carry `faceImageData`, so logging bodies wrote biometric data
+    // into Cloudflare observability on every request.
+    const len = c.res.headers.get('content-length') ?? '?';
+    console.log(
+        `[kyc] ${c.req.method} ${path} → ${c.res.status} (${Date.now() - started}ms, ${len}b)`,
+    );
 });
 
-// KYC is the only domain that must run on the Cloudflare Worker (signing secrets,
-// CF runtime). All other /api/* is served by the Next.js Pages app, which talks to
-// NestJS directly. See apps/frontend/src/app/api/**.
+// This Worker serves ONLY /api/kyc/*. Each product's own app proxies to it and
+// handles everything else against its own backend directly — the Worker exists
+// because the KYC pipeline needs the Cloudflare runtime and holds the signing
+// secrets, not because it is a general API gateway.
 app.route('/api/kyc', kycRoutes);
 
 app.get('/health', (c) =>
     c.json({ status: 'ok', env: c.env.ENVIRONMENT ?? 'unknown', ts: Date.now() }),
+);
+
+/**
+ * Integration diagnostic: which tenants exist, and are their secrets set?
+ *
+ * The first thing to hit when wiring up a new product. Without it, a missing
+ * secret surfaces as a 503 from deep inside a signed commit and the integrator
+ * cannot tell a config problem from a code problem.
+ *
+ * Booleans only — never a secret, its value, or its length. Base URLs are
+ * already public config that ships with the Worker.
+ */
+app.get('/ready', (c) =>
+    c.json({ status: 'ok', env: c.env.ENVIRONMENT ?? 'unknown', tenants: tenantReport(c.env) }),
 );
 
 app.notFound((c) => c.json({ error: 'Not found' }, 404));

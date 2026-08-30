@@ -7,18 +7,46 @@ import { getOpenAI } from '../lib/openai';
 import { postSignedToNest, patchSignedToNest } from '../lib/kycSigning';
 import { compareConfig, faceConfig, idConfig } from '../config/kycConfig';
 import type { AnalyzeIdResult, AnalyzeIdCode } from '../services/kyc/kycService.interface';
+import { resolveTenant, TenantNotConfiguredError, type TenantConfig } from '../lib/tenant';
 
-export const kycRoutes = new Hono<{ Bindings: Env }>();
+export const kycRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant: TenantConfig };
+}>();
 
 /**
- * Access token for the onboarding routes. Web sends it as the `rdb_at` cookie;
- * native clients (Flutter) without a cookie jar send `Authorization: Bearer`.
- * Bearer wins so a stale copied cookie can never shadow a fresh native token.
+ * Resolve the tenant once, before any route runs.
+ *
+ * Every route below reads `c.get('tenant')` rather than any `c.env` binding, so
+ * a base URL can never be paired with another tenant's signing secret — see
+ * lib/tenant.ts. A request with no tenant header resolves to RDB, which is what
+ * every existing client sends.
  */
-function accessToken(c: Context): string {
+kycRoutes.use('*', async (c, next) => {
+  try {
+    c.set('tenant', resolveTenant(c));
+  } catch (err) {
+    if (err instanceof TenantNotConfiguredError) {
+      // A deployment problem, not a caller problem — say so plainly instead of
+      // falling through to the other tenant's backend with these credentials.
+      console.error('[tenant]', err.message);
+      return c.json({ error: err.message }, 503);
+    }
+    throw err;
+  }
+  await next();
+});
+
+/**
+ * Access token for the onboarding routes. Web sends it as the tenant's access
+ * cookie; native clients (Flutter) without a cookie jar send
+ * `Authorization: Bearer`. Bearer wins so a stale copied cookie can never
+ * shadow a fresh native token.
+ */
+function accessToken(c: Context<{ Bindings: Env; Variables: { tenant: TenantConfig } }>): string {
   const h = c.req.header('Authorization');
   if (h && h.startsWith('Bearer ')) return h.slice(7);
-  return getCookie(c, 'rdb_at') ?? '';
+  return getCookie(c, c.get('tenant').cookies.access) ?? '';
 }
 
 // ── POST /api/kyc/analyze-id ─────────────────────────────────────────────────
@@ -60,14 +88,14 @@ kycRoutes.post('/analyze-id', async (c) => {
           return c.json({ status: 'error', code: 'MISSING_CRITICAL_DATA', message: 'ID not clearly readable. Hold the card flat, well-lit, and try again.', side: 'front', found: false } satisfies AnalyzeIdResult);
         }
         const isPassport = (ext.idType ?? '').toLowerCase().includes('passport');
-        const extractedData: AnalyzeIdResult['extractedData'] = { idType: ext.idType ?? '', idName: ext.idType ?? '', country: ext.country ?? '', name: ext.name ?? '', nationalNumber: ext.nationalNumber ?? '', birthday: ext.birthday ?? '', firstName: ext.firstName, lastName: ext.lastName, documentNumber: isPassport ? ext.passportNumber : ext.documentNumber, expiryDate: ext.expiryDate, rawText: ext.rawText };
+        const extractedData: AnalyzeIdResult['extractedData'] = { idType: ext.idType ?? '', idName: ext.idType ?? '', country: ext.country ?? '', countryIso3: ext.countryIso3, name: ext.name ?? '', nationalNumber: ext.nationalNumber ?? '', birthday: ext.birthday ?? '', firstName: ext.firstName, lastName: ext.lastName, documentNumber: isPassport ? ext.passportNumber : ext.documentNumber, expiryDate: ext.expiryDate, rawText: ext.rawText };
         return c.json({ status: 'success', nextStep: isPassport ? 'COMPLETE' : 'REQUIRE_BACK', croppedImageData: cropped, idFaceImageData: result.idFaceImageData, side: 'front', extracted: ext, extractedData, found: true } satisfies AnalyzeIdResult);
       }
 
       const rawBack = ext.rawText ?? '';
       const hasContent = /<{5,}/.test(rawBack) || !!ext.address || !!ext.documentNumber || !!ext.nationalNumber || rawBack.length >= 30;
       if (!hasContent) return c.json({ status: 'error', code: 'MISSING_CRITICAL_DATA', message: 'ID not clearly readable. Hold the card flat, well-lit, and try again.', side: 'back', found: false } satisfies AnalyzeIdResult);
-      return c.json({ status: 'success', nextStep: 'COMPLETE', croppedImageData: cropped, side: 'back', extracted: ext, extractedData: { idType: ext.idType ?? '', idName: ext.idType ?? '', country: ext.country ?? '', name: ext.name ?? '', nationalNumber: ext.nationalNumber ?? '', birthday: ext.birthday ?? '', firstName: ext.firstName, lastName: ext.lastName, documentNumber: ext.documentNumber, expiryDate: ext.expiryDate, rawText: ext.rawText }, found: true } satisfies AnalyzeIdResult);
+      return c.json({ status: 'success', nextStep: 'COMPLETE', croppedImageData: cropped, side: 'back', extracted: ext, extractedData: { idType: ext.idType ?? '', idName: ext.idType ?? '', country: ext.country ?? '', countryIso3: ext.countryIso3, name: ext.name ?? '', nationalNumber: ext.nationalNumber ?? '', birthday: ext.birthday ?? '', firstName: ext.firstName, lastName: ext.lastName, documentNumber: ext.documentNumber, expiryDate: ext.expiryDate, rawText: ext.rawText }, found: true } satisfies AnalyzeIdResult);
     } catch (err) {
       console.error('[analyze-id] AWS failure:', err);
       return c.json({ error: 'analyze-id failed', detail: String(err) }, 500);
@@ -80,7 +108,7 @@ kycRoutes.post('/analyze-id', async (c) => {
   pollCounters.set(key, count);
   if (count <= 2) return c.json({ status: 'not_found', side, found: false } satisfies AnalyzeIdResult);
   pollCounters.delete(key);
-  const mockExtracted = { idType: 'Personal Identity ID', idName: 'Personal Identity ID', country: 'Syria', name: 'Mohammad De Bruijn', firstName: 'Mohammad', lastName: 'De Bruijn', nationalNumber: '09982111123332', documentNumber: '09982111123332', birthday: '01.01.1999', expiryDate: '01.01.2030' };
+  const mockExtracted = { idType: 'Personal Identity ID', idName: 'Personal Identity ID', country: 'Syria', countryIso3: 'SYR', name: 'Mohammad De Bruijn', firstName: 'Mohammad', lastName: 'De Bruijn', nationalNumber: '09982111123332', documentNumber: '09982111123332', birthday: '01.01.1999', expiryDate: '01.01.2030' };
   if (side === 'front') return c.json({ status: 'success', nextStep: 'REQUIRE_BACK', croppedImageData: imageData, side: 'front', extracted: mockExtracted, extractedData: mockExtracted, found: true } satisfies AnalyzeIdResult);
   return c.json({ status: 'success', nextStep: 'COMPLETE', croppedImageData: imageData, side: 'back', extracted: mockExtracted, extractedData: mockExtracted, found: true } satisfies AnalyzeIdResult);
 });
@@ -199,16 +227,94 @@ kycRoutes.post('/liveness-credentials', async (c) => {
   const currentUserId = jwtSub(token);
   if (!currentUserId) return c.json({ error: 'Unauthorized' }, 401);
 
-  const validateRes = await backendFetch(c.env.RDB_BASE_URL, `/kyc/sessions/${kycSessionId}/validate`, {
+  const validateRes = await backendFetch(c.get('tenant').baseUrl, `/kyc/sessions/${kycSessionId}/validate`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': c.env.KYC_INTERNAL_SECRET ?? '' },
+    headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': c.get('tenant').internalSecret },
     body: JSON.stringify({ userId: currentUserId }),
   });
   if (!validateRes.ok) return c.json({ error: 'Invalid or expired KYC session' }, 401);
 
-  const sessionToken = c.env.AWS_SESSION_TOKEN || undefined;
-  return c.json({ accessKeyId: c.env.AWS_ACCESS_KEY_ID, secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY, ...(sessionToken ? { sessionToken } : {}) });
+  return livenessCredentials(c);
 });
+
+/**
+ * Browser credentials for the Amplify FaceLivenessDetector — scoped to one
+ * action and fifteen minutes.
+ *
+ * ── What this replaces ──────────────────────────────────────────────────────
+ * Both credential endpoints used to return `c.env.AWS_ACCESS_KEY_ID` and
+ * `AWS_SECRET_ACCESS_KEY` verbatim: the worker's own long-lived IAM user keys,
+ * the same pair realKycService signs Textract and Rekognition with. Handing
+ * those to a browser gives whoever holds them everything that identity can do,
+ * from anywhere, until somebody rotates the key. The liveness component does
+ * need credentials in the browser. It does not need THOSE credentials.
+ *
+ * ── Why GetFederationToken ──────────────────────────────────────────────────
+ * It re-signs the same identity down to an inline session policy, and such a
+ * policy can only ever grant a SUBSET of what the caller already holds — so
+ * this cannot widen access even if the policy below is wrong. What comes back
+ * can open one liveness stream and nothing else: no Textract, no S3, no other
+ * Rekognition call. It expires in fifteen minutes, the floor this API allows.
+ *
+ * AssumeRole would be the alternative, but it needs a role to exist first;
+ * GetFederationToken works directly from the IAM user keys already configured,
+ * so this is a code change rather than an AWS change.
+ *
+ * ⚠️ ROTATE `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. They were returned
+ * by a deployed endpoint, so treat them as disclosed even though no caller is
+ * known.
+ */
+async function livenessCredentials(
+    c: Context<{ Bindings: Env; Variables: { tenant: TenantConfig } }>,
+) {
+  const region = c.env.AWS_REGION || 'us-east-1';
+  const accessKeyId = c.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = c.env.AWS_SECRET_ACCESS_KEY;
+  if (!accessKeyId || !secretAccessKey) {
+    return c.json({ error: 'AWS credentials are not configured' }, 500);
+  }
+
+  try {
+    const { STSClient, GetFederationTokenCommand } = await import('@aws-sdk/client-sts');
+    const sts = new STSClient({ region, credentials: { accessKeyId, secretAccessKey } });
+    const out = await sts.send(
+      new GetFederationTokenCommand({
+        // 2–32 chars. Appears in CloudTrail as the federated principal, so it
+        // is worth being recognisable.
+        Name: 'kyc-face-liveness',
+        DurationSeconds: 900,
+        Policy: JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [
+            {
+              Effect: 'Allow',
+              Action: ['rekognition:StartFaceLivenessSession'],
+              // The streaming API carries its session id in the request, not in
+              // an ARN, so there is no narrower resource to name. The session id
+              // is the second lock: minted server-side, and single use.
+              Resource: '*',
+            },
+          ],
+        }),
+      }),
+    );
+
+    const cred = out.Credentials;
+    if (!cred?.AccessKeyId || !cred.SecretAccessKey || !cred.SessionToken) {
+      return c.json({ error: 'STS did not return credentials' }, 500);
+    }
+
+    return c.json({
+      accessKeyId: cred.AccessKeyId,
+      secretAccessKey: cred.SecretAccessKey,
+      sessionToken: cred.SessionToken,
+      expiration: cred.Expiration?.toISOString(),
+    });
+  } catch (err) {
+    console.error('[liveness] STS federation failed', err);
+    return c.json({ error: 'Could not issue liveness credentials' }, 500);
+  }
+}
 
 function jwtSub(token: string): string | undefined {
   try {
@@ -262,7 +368,7 @@ kycRoutes.post('/session', async (c) => {
   const token = accessToken(c);
   if (!token) return c.json({ error: 'Unauthorized' }, 401);
   try {
-    const res = await backendFetch(c.env.RDB_BASE_URL, '/kyc/sessions/start', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+    const res = await backendFetch(c.get('tenant').baseUrl, '/kyc/sessions/start', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
     const data = await res.json();
     return c.json(data, res.status as 200);
   } catch {
@@ -275,7 +381,7 @@ kycRoutes.get('/status', async (c) => {
   const token = accessToken(c);
   if (!token) return c.json({ error: 'Unauthorized' }, 401);
   try {
-    const res = await backendFetch(c.env.RDB_BASE_URL, '/kyc/status', { headers: { Authorization: `Bearer ${token}` } });
+    const res = await backendFetch(c.get('tenant').baseUrl, '/kyc/status', { headers: { Authorization: `Bearer ${token}` } });
     const data = await res.json().catch(() => ({}));
     return c.json(data, res.status as 200);
   } catch {
@@ -288,14 +394,14 @@ kycRoutes.get('/current', async (c) => {
   const token = accessToken(c);
   if (!token) return c.json({ error: 'Unauthorized' }, 401);
   try {
-    const res = await backendFetch(c.env.RDB_BASE_URL, '/kyc/current', { headers: { Authorization: `Bearer ${token}` } });
+    const res = await backendFetch(c.get('tenant').baseUrl, '/kyc/current', { headers: { Authorization: `Bearer ${token}` } });
     const kycRequest = res.status === 404 ? null : await res.json().catch(() => null);
     const isProduction = c.env.ENVIRONMENT === 'production';
-    const existing = getCookie(c, 'rdb_user');
+    const existing = getCookie(c, `${c.get('tenant').id}_user`);
     if (existing) {
       try {
         const user = JSON.parse(existing);
-        setCookie(c, 'rdb_user', JSON.stringify({ ...user, kycRequest: kycRequest ?? null }), { httpOnly: true, secure: isProduction, sameSite: 'Strict', expires: new Date(Date.now() + 24 * 60 * 60 * 1000), path: '/' });
+        setCookie(c, `${c.get('tenant').id}_user`, JSON.stringify({ ...user, kycRequest: kycRequest ?? null }), { httpOnly: true, secure: isProduction, sameSite: 'Strict', expires: new Date(Date.now() + 24 * 60 * 60 * 1000), path: '/' });
       } catch { /* non-fatal */ }
     }
     return c.json({ kycRequest: kycRequest ?? null });
@@ -324,7 +430,9 @@ kycRoutes.get('/current', async (c) => {
  * Authorization Bearer exclusively, so the cookie value is re-sent as a
  * Bearer by postSignedToNest, never as a cookie.
  */
-function reverifyAuth(c: Context): { token: string; isSessionStep: boolean } {
+function reverifyAuth(
+  c: Context<{ Bindings: Env; Variables: { tenant: TenantConfig } }>,
+): { token: string; isSessionStep: boolean } {
   // Native mid-login (reset-passcode): Flutter has no cookie jar, so the login
   // SESSION stepToken rides an explicit header. Checked first — sending it as a
   // plain Bearer would be mistaken for an access token, and the enrolled-selfie
@@ -333,14 +441,16 @@ function reverifyAuth(c: Context): { token: string; isSessionStep: boolean } {
   if (step) return { token: step, isSessionStep: true };
   const h = c.req.header('Authorization');
   if (h && h.startsWith('Bearer ')) return { token: h.slice(7), isSessionStep: false };
-  const at = getCookie(c, 'rdb_at');
+  const at = getCookie(c, c.get('tenant').cookies.access);
   if (at) return { token: at, isSessionStep: false };
-  const stepCookie = getCookie(c, 'rdb_step');
+  const stepCookie = getCookie(c, c.get('tenant').cookies.step);
   if (stepCookie) return { token: stepCookie, isSessionStep: true };
   return { token: '', isSessionStep: false };
 }
 
-function reverifyToken(c: Context): string {
+function reverifyToken(
+  c: Context<{ Bindings: Env; Variables: { tenant: TenantConfig } }>,
+): string {
   return reverifyAuth(c).token;
 }
 
@@ -362,20 +472,56 @@ async function validateReverifyChallenge(
   userId: string,
   internalSecret: string,
 ): Promise<ReverifyChallengeInfo> {
+  // ── Every failure below collapses into the same `{valid:false}` ──────────
+  // …which the caller reports as "Invalid or expired re-verification
+  // challenge". That single message therefore covers: the endpoint not
+  // existing, a rejected internal secret, an unreachable backend, and a
+  // genuine refusal — the commonest being a challenge that has not reached
+  // FACE_REQUIRED yet.
+  //
+  // Collapsing them for the CLIENT is right: distinguishing them would let a
+  // caller learn whether a challenge id is real. Collapsing them SILENTLY is
+  // not — it left an integration with one indistinguishable message and no way
+  // to tell a missing endpoint from a working one saying no. So each cause is
+  // named here, in logs only operators can read.
   try {
     const res = await backendFetch(baseUrl, `/kyc/reverify/${challengeId}/validate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': internalSecret },
       body: JSON.stringify({ userId }),
     });
-    if (!res.ok) return { valid: false, selfieImageUrl: null };
+    if (!res.ok) {
+      console.warn(
+        `[reverify] validate → ${res.status} for challenge ${challengeId}` +
+          (res.status === 404
+            ? ' (endpoint not implemented on this backend?)'
+            : res.status === 401 || res.status === 403
+              ? ' (X-Internal-Secret rejected — does it match the backend?)'
+              : ''),
+      );
+      return { valid: false, selfieImageUrl: null };
+    }
     // `valid !== false` keeps pre-ADR-013 backends (empty/`ok`-only bodies) valid.
     const body = (await res.json().catch(() => ({}))) as {
       valid?: boolean;
       selfieImageUrl?: string | null;
     };
+    if (body.valid === false) {
+      console.warn(
+        `[reverify] validate refused challenge ${challengeId}` +
+          ' (wrong stage, expired, or already spent)',
+      );
+    } else if (!body.selfieImageUrl) {
+      // Valid, but nothing to compare against. The Worker then falls back to
+      // GET /kyc/current, which cannot work mid-login — and that surfaces much
+      // later as NO_ENROLLED_SELFIE, far from the cause.
+      console.warn(
+        `[reverify] validate passed challenge ${challengeId} but returned no selfieImageUrl`,
+      );
+    }
     return { valid: body.valid !== false, selfieImageUrl: body.selfieImageUrl ?? null };
-  } catch {
+  } catch (err) {
+    console.warn(`[reverify] validate could not reach ${baseUrl}:`, err);
     return { valid: false, selfieImageUrl: null };
   }
 }
@@ -447,7 +593,7 @@ kycRoutes.post('/reverify/start', async (c) => {
   }
   if (!challengeId) return c.json({ error: 'challengeId is required' }, 422);
 
-  const challenge = await validateReverifyChallenge(c.env.RDB_BASE_URL, challengeId, userId, c.env.KYC_INTERNAL_SECRET ?? '');
+  const challenge = await validateReverifyChallenge(c.get('tenant').baseUrl, challengeId, userId, c.get('tenant').internalSecret);
   if (!challenge.valid) return c.json({ error: 'Invalid or expired re-verification challenge' }, 401);
 
   try {
@@ -472,15 +618,12 @@ kycRoutes.get('/reverify/credentials', async (c) => {
   const challengeId = c.req.query('challengeId') ?? '';
   if (!challengeId) return c.json({ error: 'challengeId is required' }, 422);
 
-  const challenge = await validateReverifyChallenge(c.env.RDB_BASE_URL, challengeId, userId, c.env.KYC_INTERNAL_SECRET ?? '');
+  const challenge = await validateReverifyChallenge(c.get('tenant').baseUrl, challengeId, userId, c.get('tenant').internalSecret);
   if (!challenge.valid) return c.json({ error: 'Invalid or expired re-verification challenge' }, 401);
 
-  const sessionToken = c.env.AWS_SESSION_TOKEN || undefined;
-  return c.json({
-    accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-    ...(sessionToken ? { sessionToken } : {}),
-  });
+  // Same short-lived, single-action credentials as the other path — see
+  // livenessCredentials(). This endpoint returned the worker's raw IAM keys too.
+  return livenessCredentials(c);
 });
 
 // POST /api/kyc/reverify/verify — run liveness + compare-against-enrolled-selfie,
@@ -508,10 +651,10 @@ kycRoutes.post('/reverify/verify', async (c) => {
   // burning AWS liveness/compare spend on a dead challenge. Mid-login this is
   // the only selfie source — the session stepToken 401s on GET /kyc/current.
   const challenge = await validateReverifyChallenge(
-    c.env.RDB_BASE_URL,
+    c.get('tenant').baseUrl,
     challengeId,
     userId,
-    c.env.KYC_INTERNAL_SECRET ?? '',
+    c.get('tenant').internalSecret,
   );
   if (!challenge.valid) {
     return c.json({ error: 'Invalid or expired re-verification challenge' }, 401);
@@ -569,7 +712,7 @@ kycRoutes.post('/reverify/verify', async (c) => {
       // Idle: unchanged — /kyc/current with the access token.
       const enrolledSelfieB64 = isSessionStep
         ? await downloadSelfie(challenge.selfieImageUrl)
-        : await fetchEnrolledSelfie(token, c.env.RDB_BASE_URL);
+        : await fetchEnrolledSelfie(token, c.get('tenant').baseUrl);
       if (!enrolledSelfieB64) {
         return c.json({ status: 'error', code: 'NO_ENROLLED_SELFIE', message: 'No enrolled selfie on file.' });
       }
@@ -584,19 +727,22 @@ kycRoutes.post('/reverify/verify', async (c) => {
     }
 
     // 4. Commit to NestJS — NestJS makes the pass/fail decision and marks the challenge satisfied.
-    if (!c.env.KYC_SHARED_SECRET) {
+    if (!c.get('tenant').sharedSecret) {
       // Local dev without a signing secret: short-circuit (mock only).
       if (useMock) {
         return c.json({ status: 'passed', faceMatchScore, livenessConfidence, stepToken: 'mock-step' });
       }
-      return c.json({ error: 'KYC_SHARED_SECRET not configured' }, 503);
+      return c.json(
+        { error: `No signing secret configured for tenant "${c.get('tenant').id}"` },
+        503,
+      );
     }
     // Mid-login (reset-passcode step entry) commits to the step-scoped route:
     // Bearer = the login SESSION stepToken; the DTO additionally requires a
     // freshness timestamp (Unix seconds) + one-time nonce for the signature
     // (RESET_PASSCODE_STEP_FACE_WEB_INTEGRATION.md §2b). Idle flow unchanged.
     const commitRes = await postSignedToNest(
-      c.env.RDB_BASE_URL,
+      c.get('tenant').baseUrl,
       isSessionStep ? '/kyc/reverify/step/commit' : '/kyc/reverify/commit',
       isSessionStep
         ? {
@@ -608,7 +754,7 @@ kycRoutes.post('/reverify/verify', async (c) => {
           }
         : { challengeId, livenessConfidence, faceMatchScore },
       token,
-      c.env.KYC_SHARED_SECRET,
+      c.get('tenant').sharedSecret,
     );
     const text = await commitRes.text();
     if (!commitRes.ok) {
@@ -644,14 +790,20 @@ kycRoutes.post('/submit', async (c) => {
 
   try {
     const [frontUrl, backUrl, selfieUrl, nationalityCountryId] = await Promise.all([
-      uploadImage(parsed.frontImageData, 'front.jpg', 'document', token, c.env.RDB_BASE_URL),
-      isPassport ? Promise.resolve(undefined) : parsed.backImageData ? uploadImage(parsed.backImageData, 'back.jpg', 'document', token, c.env.RDB_BASE_URL) : Promise.resolve(undefined),
-      uploadImage(parsed.selfieImageData, 'selfie.jpg', 'image', token, c.env.RDB_BASE_URL),
-      resolveCountryId(parsed.extracted['country'], token, c.env.RDB_BASE_URL),
+      uploadImage(parsed.frontImageData, 'front.jpg', 'document', token, c.get('tenant').baseUrl),
+      isPassport ? Promise.resolve(undefined) : parsed.backImageData ? uploadImage(parsed.backImageData, 'back.jpg', 'document', token, c.get('tenant').baseUrl) : Promise.resolve(undefined),
+      uploadImage(parsed.selfieImageData, 'selfie.jpg', 'image', token, c.get('tenant').baseUrl),
+      resolveCountryId(parsed.extracted['country'], token, c.get('tenant').baseUrl),
     ]);
 
-    const nestPayload = { kycSessionId: parsed.kycSessionId, fullName: parsed.extracted['name'] ?? '', nationalityCountryId, documentType: mapDocumentType(parsed.extracted['idType']), documentFrontImageUrl: frontUrl, documentBackImageUrl: backUrl, selfieImageUrl: selfieUrl, nationalIdNumber: parsed.extracted['nationalNumber'] ?? parsed.extracted['documentNumber'] ?? '', selfieVsIdScore: parsed.selfieVsIdScore, livenessConfidence: parsed.livenessConfidence, documentExpiryDate: parsed.extracted['expiryDate'] };
-    const submitRes = await postSignedToNest(c.env.RDB_BASE_URL, '/kyc/submit', nestPayload, token, c.env.KYC_SHARED_SECRET);
+    // `nationalityCountryId` is RDB's foreign key, resolved by a fragile
+    // name lookup against GET /countries. It is kept so RDB is unaffected, but
+    // it is DEPRECATED: send-and-resolve belongs in the backend, where the
+    // country table actually lives. New backends should read
+    // `nationalityCountryIso3` (unambiguous, and what the extractor computed)
+    // and fall back to `nationalityCountry` when no code was determined.
+    const nestPayload = { kycSessionId: parsed.kycSessionId, fullName: parsed.extracted['name'] ?? '', nationalityCountryId, nationalityCountryIso3: parsed.extracted['countryIso3'], nationalityCountry: parsed.extracted['country'], documentType: mapDocumentType(parsed.extracted['idType']), documentFrontImageUrl: frontUrl, documentBackImageUrl: backUrl, selfieImageUrl: selfieUrl, nationalIdNumber: parsed.extracted['nationalNumber'] ?? parsed.extracted['documentNumber'] ?? '', selfieVsIdScore: parsed.selfieVsIdScore, livenessConfidence: parsed.livenessConfidence, documentExpiryDate: parsed.extracted['expiryDate'] };
+    const submitRes = await postSignedToNest(c.get('tenant').baseUrl, '/kyc/submit', nestPayload, token, c.get('tenant').sharedSecret);
     const responseText = await submitRes.text();
     if (!submitRes.ok) return c.json({ error: 'Verification backend rejected the submission.', detail: responseText }, submitRes.status >= 500 ? 502 : submitRes.status as 400);
     const result = JSON.parse(responseText);
@@ -693,6 +845,225 @@ async function resolveCountryId(name: string | undefined, token: string, baseUrl
   return data.items.find((c) => c.name.toLowerCase() === needle || c.displayName.toLowerCase() === needle)?.id;
 }
 
+// ── POST /api/kyc/enroll ──────────────────────────────────────────────────────
+//
+// First-login document enrolment, committed to the backend over the SIGNED
+// channel — the document-step twin of /reverify/verify.
+//
+// ── Why this is not /submit ─────────────────────────────────────────────────
+// /submit above is RDB's: it needs a KYC session, uploads three images to
+// /media/upload/direct, resolves a country id against /countries, then posts
+// URLs to /kyc/submit. Root has none of those — no session concept at all, and
+// all three routes answer 404 — so this sends the images inline in one signed
+// call instead. See kyc-submit-contract.md in the root dashboard workspace.
+//
+// ── Everything the backend trusts, THIS route measures ──────────────────────
+// The browser sends images and nothing else that matters. It does NOT get to
+// send the match score or the extracted fields, even though it already holds
+// both from /compare-face and /analyze-id, because a number a client can
+// choose is a number an attacker can choose — and this Worker then SIGNS it.
+// A signature over a client-supplied score would launder a forgery into
+// something the backend has every reason to trust.
+//
+// So the OCR is re-run here and the comparison is redone here, on the exact
+// bytes being committed. It costs one extra Textract call and one extra
+// CompareFaces on a request that happens once in an administrator's life.
+kycRoutes.post('/enroll', async (c) => {
+  // Mid sign-in there is no access token — only the challenge, arriving as
+  // X-Step-Token. Same resolution as the reverify routes.
+  const { token } = reverifyAuth(c);
+  if (!token) return c.json({ error: 'Unauthorized' }, 401);
+
+  let parsed: {
+    challengeId?: string;
+    documentType?: string;
+    frontImage?: string;
+    backImage?: string;
+    selfieImage?: string;
+  };
+  try {
+    parsed = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const { challengeId, frontImage, selfieImage, backImage } = parsed;
+  if (!challengeId) return c.json({ error: 'challengeId is required' }, 422);
+  if (!frontImage) return c.json({ error: 'frontImage is required' }, 422);
+  if (!selfieImage) return c.json({ error: 'selfieImage is required' }, 422);
+
+  const tenant = c.get('tenant');
+  if (!tenant.sharedSecret) {
+    // Nothing can be committed unsigned. Failing here beats sending an
+    // unsigned enrolment the backend would be right to reject.
+    return c.json(
+      { error: `No signing secret configured for tenant "${tenant.id}"` },
+      503,
+    );
+  }
+
+  try {
+    const { analyzeIdDocument, compareFaces } = await import(
+      '../services/kyc/realKycService'
+    );
+
+    // 1. Re-read the document. The client's extraction is discarded — this is
+    //    the copy that gets stored and it must describe the image beside it.
+    const doc = await analyzeIdDocument(frontImage, 'front');
+    if (!doc.found) {
+      return c.json({
+        status: 'error',
+        code: 'ID_NOT_READABLE',
+        message: 'The document could not be read. Capture it again in better light.',
+      });
+    }
+
+    // 2. Compare the photo ON the document against the captured face.
+    //    Prefer the tight crop this Worker just made; fall back to the whole
+    //    front image, which Rekognition handles — a document is a photograph
+    //    with a face in it. Threshold 0 so the ACTUAL similarity comes back:
+    //    a floor here would report every near-miss as a flat 0 and the backend
+    //    could not tell "different person" from "poor lighting".
+    const cmp = await compareFaces(doc.idFaceImageData ?? frontImage, selfieImage, 0);
+    if (!cmp.sourceFaceDetected) {
+      return c.json({
+        status: 'error',
+        code: 'ID_FACE_NOT_DETECTED',
+        message: 'No face found on the document. Capture the photo side.',
+      });
+    }
+    if (!cmp.targetFaceDetected) {
+      return c.json({
+        status: 'error',
+        code: 'FACE_NOT_DETECTED',
+        message: 'No face found in the captured photo.',
+      });
+    }
+
+    // The number the backend's threshold is about to be applied to. Logged
+    // because without it a rejection reads as "below threshold" with no way to
+    // tell a different person (single digits) from a poor capture of the right
+    // one (60s–70s) — and those have opposite fixes. `usedIdFaceCrop` matters
+    // too: comparing against the whole document page rather than the photo on
+    // it is a measurably weaker signal.
+    console.log(
+      '[enroll] compare:',
+      JSON.stringify({
+        challengeId,
+        selfieVsIdScore: cmp.similarity,
+        verdict: cmp.verdict,
+        usedIdFaceCrop: Boolean(doc.idFaceImageData),
+        unmatchedTargetFaces: cmp.unmatchedTargetFaces,
+      }),
+    );
+
+    // 3. Commit. The backend applies the thresholds and owns the verdict —
+    //    this route reports what it measured and decides nothing, exactly as
+    //    the face step does.
+    //
+    //    `livenessConfidence` is deliberately NOT sent. The only trustworthy
+    //    liveness in this flow was measured at the face step and already
+    //    committed there; the browser's copy of it is just a number it holds,
+    //    and signing it would dress it up as a measurement.
+    const e = doc.extracted;
+    const commitRes = await postSignedToNest(
+      tenant.baseUrl,
+      '/kyc/submit',
+      {
+        challengeId,
+        documentType: mapEnrolDocumentType(e.idType ?? parsed.documentType),
+        frontImage,
+        backImage,
+        selfieImage,
+        extracted: {
+          fullName: e.name,
+          documentNumber: e.documentNumber ?? e.passportNumber,
+          nationalNumber: e.nationalNumber,
+          birthDate: e.birthday,
+          expiryDate: e.expiryDate ?? e.expirationDate,
+          country: e.country,
+          countryIso3: e.countryIso3,
+        },
+        selfieVsIdScore: cmp.similarity,
+      },
+      token,
+      tenant.sharedSecret,
+    );
+
+    const text = await commitRes.text();
+
+    // 404 means the backend has not built /kyc/submit yet — a DIFFERENT thing
+    // from it refusing this document, and the caller needs to tell them apart:
+    // one is "the contract does not exist", the other is "this person did not
+    // match". Named explicitly so a client can fall back to the interim path
+    // without pattern-matching on prose, and so the fallback disappears by
+    // itself the moment the endpoint ships and stops answering 404.
+    if (commitRes.status === 404) {
+      console.warn(
+        `[enroll] /kyc/submit is not implemented on ${tenant.baseUrl} — challenge ${challengeId}`,
+      );
+      return c.json({
+        status: 'error',
+        code: 'ENROLL_NOT_IMPLEMENTED',
+        message: 'The enrolment endpoint does not exist on this backend yet.',
+      });
+    }
+
+    if (!commitRes.ok) {
+      console.warn(`[enroll] commit → ${commitRes.status} for challenge ${challengeId}`);
+      return c.json(
+        { error: 'The enrolment backend rejected the document.', detail: text },
+        commitRes.status >= 500 ? 502 : (commitRes.status as 400),
+      );
+    }
+
+    // Passed through as the backend gave it. `stepToken` is what the browser
+    // posts to /auth/identity-document; a 'failed' verdict carries no token
+    // and the flow stops there, which is the whole outcome set: device, or
+    // failed.
+    const decision = JSON.parse(text) as {
+      status?: string;
+      reason?: string;
+      stepToken?: string;
+    };
+
+    // The verdict, and whether a token came with it. Without this the tail
+    // shows a 200 for both outcomes — the commit succeeding and the backend
+    // refusing look identical from outside, and the only place the difference
+    // appears is a fixed error line on the client that names nothing.
+    console.log(
+      '[enroll] decision:',
+      JSON.stringify({
+        challengeId,
+        status: decision.status ?? 'missing',
+        reason: decision.reason,
+        hasStepToken: Boolean(decision.stepToken),
+      }),
+    );
+
+    return c.json({
+      status: decision.status ?? 'failed',
+      reason: decision.reason,
+      stepToken: decision.stepToken,
+      selfieVsIdScore: cmp.similarity,
+    });
+  } catch (err) {
+    console.error('[enroll] failed:', err);
+    return c.json(
+      { status: 'error', code: 'INTERNAL_ERROR', message: 'Enrolment failed.' },
+      500,
+    );
+  }
+});
+
+/** Textract's document-type string → the three values the backend accepts. */
+function mapEnrolDocumentType(idType?: string): string {
+  const t = (idType ?? '').toLowerCase();
+  if (t.includes('passport')) return 'PASSPORT';
+  if (t.includes('driver') || t.includes('driving')) return 'DRIVING_LICENSE';
+  return 'NATIONAL_ID';
+}
+
 // ── POST /api/kyc/complete ────────────────────────────────────────────────────
 kycRoutes.post('/complete', async (c) => {
   const token = accessToken(c);
@@ -700,259 +1071,19 @@ kycRoutes.post('/complete', async (c) => {
   let parsed: { kycSessionId: string; videoCallUrl: string; livenessConfidence: number; videoVsIdScore: number };
   try { parsed = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
   if (!parsed.kycSessionId || !parsed.videoCallUrl || parsed.livenessConfidence == null || parsed.videoVsIdScore == null) return c.json({ error: 'kycSessionId, videoCallUrl, livenessConfidence, videoVsIdScore are required' }, 422);
-  const res = await patchSignedToNest(c.env.RDB_BASE_URL, '/kyc/current/complete', parsed, token, c.env.KYC_SHARED_SECRET);
+  const res = await patchSignedToNest(c.get('tenant').baseUrl, '/kyc/current/complete', parsed, token, c.get('tenant').sharedSecret);
   const text = await res.text();
   if (!res.ok) return c.json({ error: 'Video completion failed.', detail: text }, res.status >= 500 ? 502 : res.status as 400);
   return c.json({ success: true, kycRequest: JSON.parse(text) });
 });
 
-// ── POST /api/kyc/heygen-token ────────────────────────────────────────────────
-kycRoutes.post('/heygen-token', async (c) => {
-  const apiKey = c.env.HEYGEN_API_KEY;
-  if (!apiKey) return c.json({ error: 'HEYGEN_API_KEY not set' }, 503);
-  let avatarId = c.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID ?? '';
-  let language = 'en';
-  try { const body = await c.req.json<{ language?: string }>().catch(() => ({} as { language?: string })); if (body.language) language = body.language; } catch { /* ignore */ }
-
-  const LA = 'https://api.liveavatar.com';
-  async function la<T>(path: string, opts: RequestInit): Promise<T> {
-    const res = await fetch(`${LA}${path}`, { ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers as Record<string, string>) } });
-    if (!res.ok) throw new Error(`LiveAvatar ${path} → ${res.status}: ${await res.text().catch(() => '')}`);
-    return res.json() as Promise<T>;
-  }
-
-  try {
-    if (!avatarId) {
-      const list = await la<{ data?: { avatars?: { id: string }[] } }>('/v1/avatar/user', { method: 'GET', headers: { 'X-API-KEY': apiKey } });
-      const first = list.data?.avatars?.[0]?.id;
-      if (!first) throw new Error('No avatars found in LiveAvatar account');
-      avatarId = first;
-    }
-    const tokenRes = await la<{ data?: { session_token?: string } }>('/v1/sessions/token', { method: 'POST', headers: { 'X-API-KEY': apiKey }, body: JSON.stringify({ mode: 'FULL', avatar_id: avatarId, avatar_persona: { language } }) });
-    const sessionToken = tokenRes.data?.session_token;
-    if (!sessionToken) throw new Error('No session_token in token response');
-    const startRes = await la<{ data?: { session_id?: string; livekit_url?: string; livekit_client_token?: string } }>('/v1/sessions/start', { method: 'POST', headers: { Authorization: `Bearer ${sessionToken}` }, body: '' });
-    const { session_id, livekit_url, livekit_client_token } = startRes.data ?? {};
-    if (!livekit_url || !livekit_client_token) throw new Error('Missing LiveKit credentials');
-    return c.json({ livekitUrl: livekit_url, livekitToken: livekit_client_token, sessionId: session_id });
-  } catch (err) {
-    return c.json({ error: String(err) }, 500);
-  }
-});
-
-// ── POST /api/kyc/heygen-streaming-token ─────────────────────────────────────
-kycRoutes.post('/heygen-streaming-token', async (c) => {
-  const apiKey = c.env.HEYGEN_API_KEY;
-  if (!apiKey) return c.json({ error: 'HEYGEN_API_KEY not set' }, 503);
-  const avatarId = c.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID ?? '';
-  try {
-    const res = await fetch('https://api.heygen.com/v1/streaming.create_token', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey } });
-    if (!res.ok) throw new Error(`HeyGen token API ${res.status}: ${await res.text().catch(() => '')}`);
-    const data = await res.json() as { data?: { token?: string } };
-    const token = data.data?.token;
-    if (!token) throw new Error('No token in HeyGen response');
-    return c.json({ token, avatarId });
-  } catch (err) {
-    return c.json({ error: String(err) }, 500);
-  }
-});
-
-// ── POST /api/kyc/simli-token ─────────────────────────────────────────────────
-kycRoutes.post('/simli-token', async (c) => {
-  const apiKey = c.env.SIMLI_API_KEY;
-  const body = await c.req.json<{ faceId?: string }>().catch(() => ({} as { faceId?: string }));
-  const faceId = body.faceId || c.env.SIMLI_FACE_ID || c.env.NEXT_PUBLIC_SIMLI_FACE_ID;
-  if (!apiKey || !faceId) return c.json({ error: 'Missing SIMLI config on server', details: { hasApiKey: Boolean(apiKey), hasFaceId: Boolean(faceId) } }, 503);
-  try {
-    const { generateSimliSessionToken } = await import('simli-client');
-    const { session_token } = await generateSimliSessionToken({ apiKey, config: { faceId, handleSilence: true, maxSessionLength: 300, maxIdleTime: 120, model: 'fasttalk' } });
-    return c.json({ sessionToken: session_token });
-  } catch (err) {
-    return c.json({ error: 'Failed to create Simli session token' }, 502);
-  }
-});
-
-// ── POST /api/kyc/simli-speak ─────────────────────────────────────────────────
-async function shortHash(text: string): Promise<string> {
-  const data = new TextEncoder().encode(text);
-  const buf = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 20);
-}
-
-const SIMLI_VOICE_INSTRUCTIONS: Record<string, Record<string, string>> = {
-  neutral: { ar: 'أنت موظفة دعم عملاء بنبرة أنثوية ناضجة ومهنية. صوتك واضح وواثق وودود مع دفء هادئ. تحدثي بإيقاع طبيعي قريب من المحادثة الواقعية.', en: 'You are a professional female customer-support agent. Speak at a natural conversational pace with a reassuring professional style.', tr: 'Siz profesyonel bir kadin musteri destek temsilcisisiniz. Dogal konusma hizinda konusun.' },
-  greeting: { ar: 'قدمي التحية بنبرة دافئة ومشرقة مع إيحاء خفيف وكأنك تميلين رأسك قليلًا نحو الكاميرا.', en: 'Deliver the greeting warmly and brightly, with a subtle head-tilt toward the camera.', tr: 'Selamlamayi sicak ve parlak bir tonla yapin.' },
-  smile: { ar: 'تحدثي بفرح ناعم وابتسامة صادقة؛ اجعلي الصوت مشرقًا لكن رقيقًا.', en: 'Speak with radiant but soft happiness, like a sincere smile.', tr: 'Icten bir gulumsemeyle, parlak ama yumusak bir mutluluk tonunda konusun.' },
-  verifying: { ar: 'تحدثي بهدوء مطمئن وصبر لطيف، بنبرة رقيقة وناعمة جدًا.', en: 'Use a calm, patient, and reassuring tone with very soft feminine warmth.', tr: 'Sakin, sabirli ve guven veren bir tonda konusun.' },
-  goodbye: { ar: 'اختمي المكالمة بوداع رقيق ودافئ مع لطف واضح ونبرة حنونة.', en: 'Close the call with a tender, warm farewell tone.', tr: 'Gorusmeyi nazik ve sicak bir veda tonuyla bitirin.' },
-};
-
-kycRoutes.post('/simli-speak', async (c) => {
-  let body: { text?: string; language?: string; expression?: string };
-  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
-  const text = body.text?.trim();
-  const language = String(body.language ?? 'en').toLowerCase().split('-')[0];
-  const expression = body.expression ?? 'neutral';
-  if (!text) return c.json({ error: 'text is required' }, 422);
-
-  // Edge cache lookup
-  const cache = typeof caches !== 'undefined' ? (caches as unknown as { default: Cache }).default : null;
-  let cacheKey: Request | null = null;
-  if (cache) {
-    const hash = await shortHash(text);
-    cacheKey = new Request(`https://tts-cache.internal/simli-speak?lang=${language}&expr=${expression}&h=${hash}`);
-    const hit = await cache.match(cacheKey);
-    if (hit) return hit;
-  }
-
-  const instructionMap = SIMLI_VOICE_INSTRUCTIONS[expression as string] ?? SIMLI_VOICE_INSTRUCTIONS['neutral']!;
-  const instructions = instructionMap[language as string] ?? instructionMap['en']!;
-  const openai = getOpenAI(c.env.OPENAI_API_KEY);
-
-  try {
-    const result = await openai.audio.speech.create({ model: 'gpt-4o-mini-tts', voice: 'sage', input: text, response_format: 'pcm', speed: 1.2, instructions: `${instructions} Voice Affect: Soft, gentle, soothing.` });
-    const pcmBuffer = await result.arrayBuffer();
-    const response = new Response(pcmBuffer, { status: 200, headers: { 'Content-Type': 'audio/pcm', 'X-PCM-Sample-Rate': '24000', 'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800' } });
-    if (cache && cacheKey) cache.put(cacheKey, response.clone()).catch(() => {});
-    return response;
-  } catch (err) {
-    return c.json({ error: 'TTS service unavailable' }, 502);
-  }
-});
-
-// ── POST /api/kyc/speak ───────────────────────────────────────────────────────
-const SPEAK_INSTRUCTIONS: Record<string, string> = {
-  ar: 'أنت مساعدة بنكية أنثى بصوت ناعم ودافئ وجذاب. تحدثي بالعربية بطريقة طبيعية وواضحة.',
-  en: 'You are a warm, gentle, and captivating female banking assistant. Speak naturally in English.',
-  tr: 'Siz sicak, nazik ve büyüleyici bir kadin bankacılık asistanısınız.',
-};
-
-kycRoutes.post('/speak', async (c) => {
-  let body: { text?: string; language?: string };
-  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
-  const text = body.text?.trim();
-  const language = String(body.language ?? 'en').toLowerCase().split('-')[0];
-  if (!text) return c.json({ error: 'text is required' }, 422);
-
-  const openai = getOpenAI(c.env.OPENAI_API_KEY);
-  try {
-    let result;
-    try {
-      result = await openai.audio.speech.create({ model: 'gpt-4o-mini-tts', voice: 'nova', input: text, response_format: 'mp3', speed: 1.12, instructions: SPEAK_INSTRUCTIONS[language as string] ?? SPEAK_INSTRUCTIONS['en']! });
-    } catch {
-      result = await openai.audio.speech.create({ model: 'tts-1', voice: 'nova', input: text, response_format: 'mp3', speed: 1.12 });
-    }
-    const audioBuffer = Buffer.from(await result.arrayBuffer());
-    return new Response(audioBuffer, { status: 200, headers: { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store' } });
-  } catch (err) {
-    return c.json({ error: 'TTS service unavailable' }, 502);
-  }
-});
-
-// ── POST /api/kyc/transcribe-speech ──────────────────────────────────────────
-const WHISPER_NAME_PROMPTS: Record<string, string> = { ar: 'الإجابة هي اسم أول واحد فقط بدون أي كلمات إضافية. أمثلة: محمد. يزن. علي. سارة.', en: 'The answer is a single first name with no extra words. Examples: Mohammad. Yazan. Ali. Sara.', tr: 'Cevap yalnizca tek bir ad. Ornekler: Mehmet. Ahmet. Ali. Ayse.' };
-const WHISPER_AGE_PROMPTS: Record<string, string> = { ar: 'الإجابة هي رقم واحد فقط يمثل العمر. أمثلة: 25. 30. 18. 42.', en: 'The answer is a single number representing age. Examples: 25. 30. 18. 42.', tr: 'Cevap yalnizca yasi temsil eden tek bir sayi. Ornekler: 25. 30. 18. 42.' };
-const HALLUCINATED = new Set(['اشتركوا في القناة', 'اشترك في القناة', 'subscribe to the channel', 'dont forget to subscribe']);
-
-kycRoutes.post('/transcribe-speech', async (c) => {
-  try {
-    const formData = await c.req.formData();
-    const file = formData.get('file');
-    const language = String(formData.get('language') ?? 'en').toLowerCase().split('-')[0] ?? 'en';
-    const mode = formData.get('mode') as string | null;
-    const prompt = mode === 'name' ? (WHISPER_NAME_PROMPTS[language] ?? WHISPER_NAME_PROMPTS['en']!) : mode === 'age' ? (WHISPER_AGE_PROMPTS[language] ?? WHISPER_AGE_PROMPTS['en']!) : undefined;
-
-    if (!file || typeof (file as { name?: unknown }).name !== 'string') return c.json({ error: 'Audio file is required' }, 422);
-
-    const openai = getOpenAI(c.env.OPENAI_API_KEY);
-    const result = await openai.audio.transcriptions.create({ file: file as unknown as File, model: 'whisper-1', language, temperature: 0, ...(prompt ? { prompt } : {}) });
-    const raw = 'text' in result ? result.text.trim() : '';
-    const normalized = raw.toLowerCase().replace(/[.!?،,؛:]+/g, ' ').replace(/\s+/g, ' ').trim();
-    const transcript = HALLUCINATED.has(normalized) ? '' : raw;
-    return c.json({ transcript });
-  } catch (err) {
-    return c.json({ error: 'Transcription service unavailable' }, 502);
-  }
-});
-
-// ── POST /api/kyc/verify-answer ───────────────────────────────────────────────
-const VERIFY_SYSTEM_PROMPT = `You verify identity answers spoken aloud during a KYC video call.
-
-IMPORTANT — PHRASE EXTRACTION RULE:
-The user may speak a full sentence. Extract the relevant name or age token from ANYWHERE in the phrase.
-
-For names: accept transliteration variants (Mohammad/Mohammed/Mohamed/محمد). Accept phonetic resemblance. Ignore filler words. If in doubt, lean toward MATCHES = TRUE with confidence 0.5.
-
-For dates/age: accept any equivalent format. Accept age within +/-1 year of expected.
-
-Respond ONLY with strict JSON: {"matches": true|false, "confidence": 0.0-1.0, "reasoning": "brief one-line explanation"}.`;
-
-kycRoutes.post('/verify-answer', async (c) => {
-  let body: { question: string; expected: string; transcript: string; language: string };
-  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
-  if (!body.question || !body.expected || !body.transcript) return c.json({ error: 'question, expected, transcript are required' }, 422);
-
-  const userMessage = `Question type: ${body.question}\nExpected ${body.question}: "${body.expected}"\nUser said (transcribed in ${body.language}): "${body.transcript}"\n\nDoes the user's spoken answer match the expected ${body.question}?`;
-  try {
-    const openai = getOpenAI(c.env.OPENAI_API_KEY);
-    const completion = await openai.chat.completions.create({ model: 'gpt-4o-mini', temperature: 0, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: VERIFY_SYSTEM_PROMPT }, { role: 'user', content: userMessage }] });
-    const parsed = JSON.parse(completion.choices[0]?.message?.content ?? '{}') as { matches?: boolean; confidence?: number; reasoning?: string };
-    return c.json({ matches: parsed.matches === true, confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0, reasoning: parsed.reasoning ?? '' });
-  } catch (err) {
-    return c.json({ error: 'Verification service unavailable' }, 502);
-  }
-});
-
-// ── POST /api/kyc/verify-video ────────────────────────────────────────────────
-kycRoutes.post('/verify-video', async (c) => {
-  let body: { kycSessionId?: string; language?: 'ar' | 'en' | 'tr'; expectedName?: string; expectedBirthday?: string; nameTranscript?: string | null; ageTranscript?: string | null; faceFrames?: string[]; idFaceImageData?: string; livenessConfidence?: number; videoCallUrl?: string };
-  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON body' }, 400); }
-
-  const { kycSessionId, language = 'en', expectedName, expectedBirthday, nameTranscript, ageTranscript, faceFrames = [], idFaceImageData = '', livenessConfidence = 50, videoCallUrl = '' } = body;
-  if (!expectedName || !expectedBirthday) return c.json({ error: 'expectedName and expectedBirthday are required' }, 422);
-
-  const openai = getOpenAI(c.env.OPENAI_API_KEY);
-
-  async function verifyAnswer(question: 'name' | 'birthday', expected: string, transcript: string): Promise<{ matches: boolean; confidence: number; reasoning: string }> {
-    const msg = `Question type: ${question}\nExpected ${question}: "${expected}"\nUser said: "${transcript}"\n\nDoes the user's spoken answer match?`;
-    const completion = await openai.chat.completions.create({ model: 'gpt-4o-mini', temperature: 0, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: VERIFY_SYSTEM_PROMPT }, { role: 'user', content: msg }] });
-    const parsed = JSON.parse(completion.choices[0]?.message?.content ?? '{}') as { matches?: boolean; confidence?: number; reasoning?: string };
-    return { matches: parsed.matches === true, confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0, reasoning: parsed.reasoning ?? '' };
-  }
-
-  const FAIL = { matches: false, confidence: 0, reasoning: 'no transcript provided' };
-  const [nameMatch, ageMatch] = await Promise.all([
-    nameTranscript ? verifyAnswer('name', expectedName, nameTranscript).catch(() => ({ matches: false, confidence: 0, reasoning: 'llm error' })) : Promise.resolve(FAIL),
-    ageTranscript ? verifyAnswer('birthday', expectedBirthday, ageTranscript).catch(() => ({ matches: false, confidence: 0, reasoning: 'llm error' })) : Promise.resolve(FAIL),
-  ]);
-
-  const face = await (async () => {
-    if (!idFaceImageData || faceFrames.length === 0) return { bestScore: 0, usedFrames: 0 };
-    const useMock = c.env.AWS_MOCK !== 'false';
-    if (useMock) { await new Promise((r) => setTimeout(r, compareConfig.mock.delayMs)); return { bestScore: compareConfig.mock.mockScore, usedFrames: faceFrames.length }; }
-    try {
-      const { compareFaces } = await import('../services/kyc/realKycService');
-      const scores = await Promise.all(faceFrames.map(async (frame) => { try { const r = await compareFaces(idFaceImageData, frame, compareConfig.similarity.passThreshold); return r.similarity ?? 0; } catch { return 0; } }));
-      return { bestScore: Math.max(...scores, 0), usedFrames: faceFrames.length };
-    } catch { return { bestScore: 0, usedFrames: faceFrames.length }; }
-  })();
-
-  const passed = (nameMatch.matches || nameMatch.confidence >= 0.5) && (ageMatch.matches || ageMatch.confidence >= 0.5);
-  let kycStatus: string | undefined;
-
-  if (passed && kycSessionId) {
-    try {
-      const token = accessToken(c);
-      if (token) {
-        const res = await patchSignedToNest(c.env.RDB_BASE_URL, '/kyc/current/complete', { kycSessionId, videoCallUrl, livenessConfidence, videoVsIdScore: face.bestScore }, token, c.env.KYC_SHARED_SECRET);
-        const text = await res.text();
-        if (res.ok) kycStatus = (JSON.parse(text) as { status?: string }).status;
-      }
-    } catch (err) { console.error('[verify-video] NestJS commit failed:', err); }
-  }
-
-  return c.json({ passed, nameMatch, ageMatch, face, kycStatus });
-});
+// ── REMOVED: the video-interview KYC routes ─────────────────────────────────
+//
+// /heygen-token, /heygen-streaming-token, /simli-token, /simli-speak, /speak,
+// /transcribe-speech, /verify-answer and /verify-video configured an avatar-led
+// video interview whose frontend was deleted from rdb. They had no caller in any
+// project and wrangler.toml already recorded them as inert, so they were surface
+// area with credentials attached and nothing behind them.
 
 // ── POST /api/kyc/webhook-nestjs ──────────────────────────────────────────────
 kycRoutes.post('/webhook-nestjs', async (c) => {
