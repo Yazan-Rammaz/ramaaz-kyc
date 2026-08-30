@@ -23,6 +23,13 @@ export type Env = {
     AWS_SECRET_ACCESS_KEY: string;
     AWS_SESSION_TOKEN?: string;
     AWS_MOCK: string;
+    /**
+     * Unlocks the liveness bench (`/api/kyc/liveness-lab/*`) — a way to run the
+     * AWS liveness check over and over while trying to defeat it, without
+     * walking a whole sign-in each time. UNSET means those routes do not exist.
+     * See the block above them in routes/kyc.ts for why it cannot let anyone in.
+     */
+    LIVENESS_LAB_SECRET?: string;
     OPENAI_API_KEY: string;
     // HeyGen / Simli bindings were dropped with the video-interview routes.
     KYC_WEBHOOK_SECRET: string;

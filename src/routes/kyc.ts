@@ -210,6 +210,92 @@ kycRoutes.get('/liveness-aws', async (c) => {
   }
 });
 
+// ── The liveness bench: /api/kyc/liveness-lab/* ──────────────────────────────
+//
+// Runs Rekognition Face Liveness on its own so the check can be attacked
+// repeatedly — printed photo, phone screen, video replay, mask — without
+// walking a whole sign-in between attempts. Testing anti-spoofing means dozens
+// of tries, and a bench that costs a full login per try does not get used.
+//
+// ── Why this cannot become a way in ─────────────────────────────────────────
+// It is not a bypass of the real endpoints; it is a parallel set that stops
+// short of everything that matters. It NEVER:
+//
+//   · looks at a challenge, a session, a cookie or a token
+//   · returns the reference image, or any image
+//   · calls CompareFaces, or reads the enrolled selfie
+//   · commits anything to NestJS, or mints a stepToken
+//
+// All it can produce is a status and a number. There is no code path from here
+// to being signed in, because nothing here touches the thing that signs people
+// in. Compare `/reverify/verify`, which does all four.
+//
+// Locked behind `LIVENESS_LAB_SECRET`. Unset — which is the default, and the
+// production default — and every route below 404s. Not 401: a 401 confirms
+// there is something here to unlock.
+//
+// ⚠️ It does spend money. Each run is one Face Liveness check ($0.015).
+function labUnlocked(c: Context<{ Bindings: Env; Variables: { tenant: TenantConfig } }>) {
+  const expected = c.env.LIVENESS_LAB_SECRET;
+  if (!expected) return false;
+  return c.req.header('X-Liveness-Lab') === expected;
+}
+
+kycRoutes.post('/liveness-lab/session', async (c) => {
+  if (!labUnlocked(c)) return c.json({ error: 'Not found' }, 404);
+  try {
+    const { awsRegion, rekognitionClient } = await import('../services/kyc/realKycService');
+    const { CreateFaceLivenessSessionCommand } = await import('@aws-sdk/client-rekognition');
+    const out = await rekognitionClient.send(new CreateFaceLivenessSessionCommand({}));
+    if (!out.SessionId) throw new Error('AWS did not return a liveness session ID');
+    return c.json({ sessionId: out.SessionId, region: awsRegion });
+  } catch (err) {
+    console.error('[liveness-lab] session failed', err);
+    return c.json({ error: 'Session creation failed' }, 500);
+  }
+});
+
+kycRoutes.get('/liveness-lab/credentials', async (c) => {
+  if (!labUnlocked(c)) return c.json({ error: 'Not found' }, 404);
+  // The same scoped, fifteen-minute credentials the real flow gets. The bench
+  // is not a reason to hand out anything wider.
+  return livenessCredentials(c);
+});
+
+kycRoutes.get('/liveness-lab/result', async (c) => {
+  if (!labUnlocked(c)) return c.json({ error: 'Not found' }, 404);
+  const sessionId = c.req.query('sessionId');
+  if (!sessionId) return c.json({ error: 'sessionId required' }, 400);
+  try {
+    const { rekognitionClient } = await import('../services/kyc/realKycService');
+    const { GetFaceLivenessSessionResultsCommand } = await import('@aws-sdk/client-rekognition');
+    const out = await rekognitionClient.send(
+      new GetFaceLivenessSessionResultsCommand({ SessionId: sessionId }),
+    );
+    // Status and confidence ONLY.
+    //
+    // The reference image is deliberately withheld even here. Returning it
+    // would make this endpoint a way to obtain a photograph of whoever last
+    // stood in front of the camera, and the bench has no need of it: the
+    // question being asked is "did AWS think that was a live person", and the
+    // number answers it.
+    //
+    // Note what a spoof usually looks like: SUCCEEDED with a LOW confidence.
+    // The session completed; the verdict is simply "not live". A gate that only
+    // checks Status will let it through — which is exactly what the real
+    // Worker path does today, and what this bench exists to expose.
+    return c.json({
+      status: out.Status ?? 'UNKNOWN',
+      confidence: out.Confidence ?? 0,
+      hasReferenceImage: Boolean(out.ReferenceImage?.Bytes),
+      auditImages: out.AuditImages?.length ?? 0,
+    });
+  } catch (err) {
+    console.error('[liveness-lab] result failed', err);
+    return c.json({ error: 'Results fetch failed' }, 500);
+  }
+});
+
 // ── POST /api/kyc/liveness-credentials ───────────────────────────────────────
 kycRoutes.post('/liveness-credentials', async (c) => {
   const token = accessToken(c);
