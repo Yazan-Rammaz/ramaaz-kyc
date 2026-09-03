@@ -416,7 +416,57 @@ async function livenessCredentials(
       // completely different fixes.
       const code = /<Code>([^<]+)<\/Code>/.exec(xml)?.[1] ?? `HTTP ${res.status}`;
       console.error('[liveness] STS refused:', code);
-      return c.json({ error: 'Could not issue liveness credentials', code }, 500);
+
+      // ── On AccessDenied, say WHO was denied ──────────────────────────────
+      //
+      // "AccessDenied" alone does not tell you which IAM identity to attach a
+      // policy to, and a worker's credentials are not something you can read
+      // off the console — they are a secret. GetCallerIdentity needs no
+      // permissions at all, by design, so it answers that even while everything
+      // else is refused. The reply is the account and the caller ARN, both of
+      // which the operator already knows they own; it grants nothing.
+      let identity: Record<string, string> | undefined;
+      if (code === 'AccessDenied') {
+        try {
+          const who = await aws.fetch(`https://sts.${region}.amazonaws.com/`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'Action=GetCallerIdentity&Version=2011-06-15',
+          });
+          const idXml = await who.text();
+          const grab = (tag: string) =>
+            new RegExp(`<${tag}>([^<]+)</${tag}>`).exec(idXml)?.[1];
+          const account = grab('Account');
+          identity = {
+            arn: grab('Arn') ?? 'unknown',
+            account: account ?? 'unknown',
+            // The exact resource the policy must name. It has to match the
+            // `Name` sent above, and a mismatch here denies just like a missing
+            // policy does.
+            needs: account
+              ? `sts:GetFederationToken on arn:aws:sts::${account}:federated-user/kyc-face-liveness`
+              : 'sts:GetFederationToken on the federated-user ARN',
+          };
+        } catch {
+          // Best effort. The code alone is still worth returning.
+        }
+      }
+
+      // The <Message> for AccessDenied, and only for AccessDenied.
+      //
+      // STS spells out WHY in a way the code alone cannot: "no identity-based
+      // policy allows the sts:GetFederationToken action" means the policy is
+      // absent or on the wrong principal, while "with an explicit deny in a
+      // service control policy" or "…in a permissions boundary" means the
+      // policy is there and something above it is overriding — completely
+      // different fixes, indistinguishable from `AccessDenied` on its own.
+      //
+      // Safe to return here: this message describes the caller's own IAM
+      // configuration and the action attempted. Other service errors keep their
+      // messages hidden, because those can quote request contents.
+      const why = code === 'AccessDenied' ? /<Message>([^<]+)<\/Message>/.exec(xml)?.[1] : undefined;
+
+      return c.json({ error: 'Could not issue liveness credentials', code, identity, why }, 500);
     }
 
     const pick = (tag: string) =>
@@ -786,6 +836,36 @@ kycRoutes.post('/reverify/verify', async (c) => {
   if (!challengeId) return c.json({ error: 'challengeId is required' }, 422);
   if (!parsed.sessionId && !parsed.liveFaceImageData) {
     return c.json({ error: 'sessionId or liveFaceImageData is required' }, 422);
+  }
+
+  // ── The single-frame path is a privilege, not a fallback ───────────────────
+  //
+  // Below, an image WINS over a sessionId whenever both are present. That is
+  // deliberate for RDB's Flutter client, and it means a tenant that can send an
+  // image never has to pass the liveness check at all: post
+  // `{challengeId, liveFaceImageData: <photo of the admin>}` and the request
+  // takes the CompareFaces branch, which a photograph on a second phone is
+  // known to pass. Every part of the streaming path is bypassed by one field.
+  //
+  // So the field is refused outright for tenants that did not ask for it —
+  // before the challenge is validated, so a probe cannot use this route to
+  // learn whether a challenge id is live.
+  //
+  // 422, and it names the field: the only callers that can hit this are our
+  // own, and a client sending the wrong field needs to know which one.
+  if (parsed.liveFaceImageData && !c.get('tenant').allowSingleFrameFace) {
+    console.warn(
+      `[reverify/verify] refused liveFaceImageData from tenant "${c.get('tenant').id}"` +
+        ` (allowSingleFrameFace is off) — challenge ${challengeId}`,
+    );
+    return c.json(
+      {
+        error:
+          'This tenant must complete a Face Liveness session; liveFaceImageData is not accepted.',
+        code: 'LIVENESS_SESSION_REQUIRED',
+      },
+      422,
+    );
   }
 
   // Validate the challenge (and get the enrolled selfie URL, ADR-013) BEFORE

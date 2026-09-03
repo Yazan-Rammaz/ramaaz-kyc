@@ -39,7 +39,7 @@ ENVIRONMENT = "development"
 # ⚠️ Every tenant backend must speak the SAME contract — same paths, shapes and
 # auth. Only the ORDER in which a product's own flow calls them may differ, and
 # order lives in the backend because this Worker keeps no state between calls.
-TENANTS = '''{"rdb":{"baseUrl":"https://trydos_wallet_develop.ramaaz.dev","cookies":{"access":"rdb_at","step":"rdb_step"},"origins":["https://ramaaz-digital-bank.online","https://dev.ramaaz-digital-bank.online","https://new.ramaaz-digital-bank.online","https://api.ramaaz-digital-bank.online","http://localhost:3000","https://localhost:3000"]},"root":{"baseUrl":"https://staging-backend.ramaaz.store/v1","cookies":{"access":"root_at","step":"root_challenge"},"origins":["https://canroot.yazan-adnof.workers.dev","https://ramaaz-root.yazan-adnof.workers.dev","http://localhost:3002"]}}'''
+TENANTS = '''{"rdb":{"allowSingleFrameFace":true,"baseUrl":"https://trydos_wallet_develop.ramaaz.dev","cookies":{"access":"rdb_at","step":"rdb_step"},"origins":["https://ramaaz-digital-bank.online","https://dev.ramaaz-digital-bank.online","https://new.ramaaz-digital-bank.online","https://api.ramaaz-digital-bank.online","http://localhost:3000","https://localhost:3000"]},"root":{"baseUrl":"https://staging-backend.ramaaz.store/v1","cookies":{"access":"root_at","step":"root_challenge"},"origins":["https://canroot.yazan-adnof.workers.dev","https://ramaaz-root.yazan-adnof.workers.dev","http://localhost:3002"]}}'''
 AWS_REGION = "us-east-1"
 AWS_MOCK = "false"
 OPENAI_TRANSLATION_MODEL = "gpt-4o-mini"
@@ -69,4 +69,4 @@ ENVIRONMENT = "production"
 AWS_REGION = "us-east-1"
 AWS_MOCK = "false"
 # Envs do not inherit the top-level [vars], so the registry is repeated.
-TENANTS = '''{"rdb":{"baseUrl":"https://trydos_wallet_develop.ramaaz.dev","cookies":{"access":"rdb_at","step":"rdb_step"},"origins":["https://ramaaz-digital-bank.online","https://dev.ramaaz-digital-bank.online","https://new.ramaaz-digital-bank.online","https://api.ramaaz-digital-bank.online","http://localhost:3000","https://localhost:3000"]},"root":{"baseUrl":"https://staging-backend.ramaaz.store/v1","cookies":{"access":"root_at","step":"root_challenge"},"origins":["https://canroot.yazan-adnof.workers.dev","https://ramaaz-root.yazan-adnof.workers.dev","http://localhost:3002"]}}'''
+TENANTS = '''{"rdb":{"allowSingleFrameFace":true,"baseUrl":"https://trydos_wallet_develop.ramaaz.dev","cookies":{"access":"rdb_at","step":"rdb_step"},"origins":["https://ramaaz-digital-bank.online","https://dev.ramaaz-digital-bank.online","https://new.ramaaz-digital-bank.online","https://api.ramaaz-digital-bank.online","http://localhost:3000","https://localhost:3000"]},"root":{"baseUrl":"https://staging-backend.ramaaz.store/v1","cookies":{"access":"root_at","step":"root_challenge"},"origins":["https://canroot.yazan-adnof.workers.dev","https://ramaaz-root.yazan-adnof.workers.dev","http://localhost:3002"]}}'''

@@ -45,6 +45,29 @@ export type TenantConfig = {
   cookies: { access: string; step: string };
   /** Browser origins allowed to call the Worker on this tenant's behalf. */
   origins: string[];
+  /**
+   * May this tenant post a face IMAGE to `/reverify/verify` instead of a
+   * liveness `sessionId`?
+   *
+   * ── Why this exists ─────────────────────────────────────────────────────
+   * The single-frame path runs CompareFaces on a picture the CLIENT chose.
+   * CompareFaces answers "same face" and nothing about whether a person was
+   * there, so a photograph of the enrolled admin held up on a second phone
+   * passes it — demonstrated, not theorised. The streaming path exists because
+   * of that: the client sends a session id, and the Worker fetches the image
+   * from AWS itself, so nothing the client sends can decide who is compared.
+   *
+   * With both paths open on the same route, the streaming one is advisory —
+   * an attacker skips the liveness check by posting an image instead. This
+   * flag is what closes that.
+   *
+   * ── Default false, on purpose ───────────────────────────────────────────
+   * A tenant added tomorrow gets the strong path with nobody remembering to
+   * ask for it, and allowing the weak one is an explicit, greppable grant in
+   * the config rather than an omission. RDB sets it because its Flutter client
+   * has no Amplify streaming UI and single-frame is all it can send.
+   */
+  allowSingleFrameFace: boolean;
 };
 
 /** The shape of one entry in the `TENANTS` JSON var. Secrets are NOT in here. */
@@ -52,6 +75,8 @@ type TenantVar = {
   baseUrl: string;
   cookies?: { access?: string; step?: string };
   origins?: string[];
+  /** See `allowSingleFrameFace` on TenantConfig. Absent means NOT allowed. */
+  allowSingleFrameFace?: boolean;
 };
 
 /**
@@ -227,6 +252,9 @@ export function resolveTenant(c: TenantSource): TenantConfig {
       step: entry.cookies?.step ?? `${id}_step`,
     },
     origins: entry.origins ?? [],
+    // `=== true`, not `??` — a missing, null or truthy-but-not-true value must
+    // read as "no", never as "yes". This is a security grant.
+    allowSingleFrameFace: entry.allowSingleFrameFace === true,
   };
 }
 
