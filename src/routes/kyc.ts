@@ -884,6 +884,12 @@ kycRoutes.post('/reverify/verify', async (c) => {
   const useMock = c.env.AWS_MOCK !== 'false';
   let livenessConfidence = 0;
   let faceMatchScore = 0;
+  /**
+   * The face this verdict was reached on. Declared beside the two scores
+   * because it is committed with them — it lived inside the non-mock branch,
+   * out of scope by the time the commit payload is built.
+   */
+  let liveFaceB64 = '';
 
   try {
     if (useMock) {
@@ -896,7 +902,6 @@ kycRoutes.post('/reverify/verify', async (c) => {
       // never-streamed sessionId alongside the real liveFaceImageData — which
       // would otherwise take the streaming branch and fail with status CREATED.
       // Only use the streaming path when ONLY a sessionId was provided.
-      let liveFaceB64 = '';
       if (parsed.sessionId && !parsed.liveFaceImageData) {
         const { rekognitionClient } = await import('../services/kyc/realKycService');
         const { GetFaceLivenessSessionResultsCommand } = await import('@aws-sdk/client-rekognition');
@@ -992,6 +997,24 @@ kycRoutes.post('/reverify/verify', async (c) => {
             challengeId,
             livenessConfidence,
             faceMatchScore,
+            /**
+             * The face this verdict was reached ON, so the backend can store it
+             * and hand it back as `face_capture_url`.
+             *
+             * ⚠️ It comes from HERE and not from the browser, and that
+             * distinction is the point. This is the reference image
+             * Rekognition returned for the session and the one CompareFaces
+             * scored — fetched server-side from AWS, never uploaded. The
+             * browser's copy is a presentational still it chose itself; storing
+             * that as the record of an identity check would mean the record and
+             * the decision are two different pictures, and only one of them was
+             * ever verified.
+             *
+             * A `data:image/jpeg;base64,…` URL, matching how images already
+             * travel through this Worker (see `enroll`). Adds ~200-400KB to a
+             * request that was 78 bytes.
+             */
+            faceCapturedPhoto: liveFaceB64 || undefined,
             timestamp: Math.floor(Date.now() / 1000),
             nonce: crypto.randomUUID(),
           }
