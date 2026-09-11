@@ -913,6 +913,28 @@ kycRoutes.post('/reverify/verify', async (c) => {
         }
         const refBytes = out.ReferenceImage?.Bytes;
         if (!refBytes) {
+          // Reaching here means AWS said SUCCEEDED — the branch above already
+          // returned for every other status — and then handed back no image.
+          // That should not happen: the session is created with
+          // `CreateFaceLivenessSessionCommand({})`, no OutputConfig, and
+          // without one Rekognition returns the reference image INLINE as
+          // `ReferenceImage.Bytes`. An OutputConfig would move it to S3 and
+          // leave `S3Object` set instead, which is the first thing to rule out.
+          //
+          // Logged field by field because the alternative is guessing at
+          // somebody else's API from a single sentence on a screen. NEVER the
+          // bytes themselves — this is a photograph of a face.
+          console.warn('[reverify/verify] SUCCEEDED but no reference image', {
+            status: out.Status,
+            confidence: out.Confidence,
+            hasReferenceImage: Boolean(out.ReferenceImage),
+            referenceImageKeys: out.ReferenceImage
+              ? Object.keys(out.ReferenceImage)
+              : [],
+            hasS3Object: Boolean(out.ReferenceImage?.S3Object),
+            byteLength: out.ReferenceImage?.Bytes?.length ?? null,
+            auditImages: out.AuditImages?.length ?? 0,
+          });
           return c.json({ status: 'error', code: 'LIVENESS_FAILED', message: 'No liveness reference image returned.' });
         }
         liveFaceB64 = `data:image/jpeg;base64,${Buffer.from(refBytes).toString('base64')}`;

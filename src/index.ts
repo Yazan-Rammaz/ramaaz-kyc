@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { kycRoutes } from './routes/kyc';
+import { signalRoutes, SignalRoom } from './routes/signal';
 import { allowedOrigins, tenantReport } from './lib/tenant';
 
 export type Env = {
@@ -37,6 +38,11 @@ export type Env = {
     KYC_INTERNAL_SECRET: string;
     KYC_TRANSLATE_ARABIC_NAMES: string;
     OPENAI_TRANSLATION_MODEL: string;
+    /**
+     * Camera hand-off signaling rooms. See routes/signal.ts — it holds two
+     * short SDP blobs for two minutes and nothing else. No image, no token.
+     */
+    SIGNAL_ROOM: DurableObjectNamespace;
 };
 
 /**
@@ -118,6 +124,10 @@ app.use('/api/kyc/*', async (c, next) => {
 // handles everything else against its own backend directly — the Worker exists
 // because the KYC pipeline needs the Cloudflare runtime and holds the signing
 // secrets, not because it is a general API gateway.
+// Ahead of kycRoutes so the room id is never mistaken for a KYC path. Carries
+// no auth by design — see the header of routes/signal.ts.
+app.route('/api/kyc/signal', signalRoutes);
+
 app.route('/api/kyc', kycRoutes);
 
 app.get('/health', (c) =>
@@ -146,3 +156,6 @@ app.onError((err, c) => {
 });
 
 export default app;
+
+// Cloudflare resolves a Durable Object class from the entrypoint's exports.
+export { SignalRoom };

@@ -62,6 +62,24 @@ KYC_TRANSLATE_ARABIC_NAMES = "true"
 #   wrangler secret put KYC_INTERNAL_SECRET --env production
 #   wrangler secret put KYC_SHARED_SECRET --env production
 
+# ── Camera hand-off signaling rooms ─────────────────────────────────────────
+#
+# The ONLY stateful binding this Worker has, and it holds the least it possibly
+# could: two SDP strings per room, for two minutes, then deleted. No image, no
+# token, no tenant data — see src/routes/signal.ts.
+#
+# A Durable Object and not KV because this is a handshake. The phone writes its
+# answer and the desktop reads it about a second later; KV is eventually
+# consistent and may serve a stale miss for that read, which looks exactly like
+# a phone that scanned and then did nothing.
+[[durable_objects.bindings]]
+name = "SIGNAL_ROOM"
+class_name = "SignalRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SignalRoom"]
+
 [env.production]
 name = "ramaaz-kyc-production"
 [env.production.vars]
@@ -70,3 +88,9 @@ AWS_REGION = "us-east-1"
 AWS_MOCK = "false"
 # Envs do not inherit the top-level [vars], so the registry is repeated.
 TENANTS = '''{"rdb":{"allowSingleFrameFace":true,"baseUrl":"https://trydos_wallet_develop.ramaaz.dev","cookies":{"access":"rdb_at","step":"rdb_step"},"origins":["https://ramaaz-digital-bank.online","https://dev.ramaaz-digital-bank.online","https://new.ramaaz-digital-bank.online","https://api.ramaaz-digital-bank.online","http://localhost:3000","https://localhost:3000"]},"root":{"baseUrl":"https://staging-backend.ramaaz.store/v1","cookies":{"access":"root_at","step":"root_challenge"},"origins":["https://canroot.yazan-adnof.workers.dev","https://ramaaz-root.yazan-adnof.workers.dev","http://localhost:3002"]}}'''
+
+# Envs do not inherit top-level bindings, same as [vars] above — repeat it or
+# the production Worker has no SIGNAL_ROOM and every hand-off 500s.
+[[env.production.durable_objects.bindings]]
+name = "SIGNAL_ROOM"
+class_name = "SignalRoom"
