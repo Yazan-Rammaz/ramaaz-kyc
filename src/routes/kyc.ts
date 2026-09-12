@@ -790,7 +790,29 @@ kycRoutes.post('/reverify/start', async (c) => {
   try {
     const { awsRegion, rekognitionClient } = await import('../services/kyc/realKycService');
     const { CreateFaceLivenessSessionCommand } = await import('@aws-sdk/client-rekognition');
-    const out = await rekognitionClient.send(new CreateFaceLivenessSessionCommand({}));
+    const out = await rekognitionClient.send(new CreateFaceLivenessSessionCommand({
+        /**
+         * Ask AWS to keep a few frames besides the reference image.
+         *
+         * ⚠️ `AuditImages` is EMPTY unless this is set — it is not a thing you
+         * can start reading after the fact, it has to be requested when the
+         * session is created. Without it there is exactly one image in the
+         * result, and a session that comes back SUCCEEDED with no
+         * `ReferenceImage.Bytes` has nothing left to fall back on and dead-ends
+         * the whole sign-in. That happened.
+         *
+         * The fallback matters more than it sounds: an audit frame is still
+         * FETCHED SERVER-SIDE FROM AWS, never uploaded by the browser, so the
+         * property that actually carries the security — a tampered client
+         * cannot choose which face gets compared — survives using one. It is a
+         * sampled frame rather than the one AWS judged best, so it is second
+         * choice for the stored record and far better than no record.
+         *
+         * Scoped to THIS route deliberately. /liveness-lab/session never
+         * returns an image by design, and /liveness-aws is RDB's.
+         */
+        Settings: { AuditImagesLimit: 4 },
+      }));
     if (!out.SessionId) throw new Error('AWS did not return a liveness session ID');
     return c.json({ sessionId: out.SessionId, region: awsRegion });
   } catch (err) {
@@ -916,32 +938,56 @@ kycRoutes.post('/reverify/verify', async (c) => {
           console.warn('[reverify/verify] liveness not succeeded:', out.Status, 'confidence:', out.Confidence);
           return c.json({ status: 'error', code: 'LIVENESS_FAILED', message: 'Liveness check did not succeed.', livenessStatus: out.Status ?? 'UNKNOWN', confidence: out.Confidence ?? 0 });
         }
-        const refBytes = out.ReferenceImage?.Bytes;
+        /**
+         * The face AWS judged — the reference image, or an audit frame.
+         *
+         * ⚠️ Both, because the reference image is not guaranteed. A session can
+         * come back SUCCEEDED with `ReferenceImage.Bytes` absent, and when it
+         * did the sign-in dead-ended here on a check that had PASSED. The audit
+         * frames exist for exactly this (see AuditImagesLimit at /reverify/start).
+         *
+         * Order matters: the reference image is the one AWS selected as best,
+         * so it is preferred whenever it is there. An audit frame is a fallback,
+         * not an equal.
+         *
+         * Both come from AWS server-side, so neither weakens the property that
+         * the browser cannot choose which face is compared.
+         */
+        const refBytes =
+          out.ReferenceImage?.Bytes ??
+          out.AuditImages?.find((img) => img.Bytes?.length)?.Bytes;
+
         if (!refBytes) {
-          // Reaching here means AWS said SUCCEEDED — the branch above already
-          // returned for every other status — and then handed back no image.
-          // That should not happen: the session is created with
-          // `CreateFaceLivenessSessionCommand({})`, no OutputConfig, and
-          // without one Rekognition returns the reference image INLINE as
-          // `ReferenceImage.Bytes`. An OutputConfig would move it to S3 and
-          // leave `S3Object` set instead, which is the first thing to rule out.
-          //
-          // Logged field by field because the alternative is guessing at
-          // somebody else's API from a single sentence on a screen. NEVER the
-          // bytes themselves — this is a photograph of a face.
-          console.warn('[reverify/verify] SUCCEEDED but no reference image', {
+          // Nothing usable at all. AWS said SUCCEEDED — the branch above
+          // returned for every other status — and then handed back no image in
+          // either place. Logged field by field because the alternative is
+          // guessing at somebody else's API from one sentence on a screen.
+          // NEVER the bytes themselves: this is a photograph of a face.
+          console.warn('[reverify/verify] SUCCEEDED but no usable image', {
             status: out.Status,
             confidence: out.Confidence,
             hasReferenceImage: Boolean(out.ReferenceImage),
             referenceImageKeys: out.ReferenceImage
               ? Object.keys(out.ReferenceImage)
               : [],
+            // S3Object set instead of Bytes would mean an OutputConfig is in
+            // play somewhere and the image went to a bucket. Nothing sets one
+            // today, so this should always be false.
             hasS3Object: Boolean(out.ReferenceImage?.S3Object),
-            byteLength: out.ReferenceImage?.Bytes?.length ?? null,
             auditImages: out.AuditImages?.length ?? 0,
+            auditImagesWithBytes:
+              out.AuditImages?.filter((img) => img.Bytes?.length).length ?? 0,
           });
           return c.json({ status: 'error', code: 'LIVENESS_FAILED', message: 'No liveness reference image returned.' });
         }
+
+        if (!out.ReferenceImage?.Bytes) {
+          console.warn(
+            '[reverify/verify] no reference image — using an audit frame',
+            { confidence: out.Confidence, auditImages: out.AuditImages?.length ?? 0 },
+          );
+        }
+
         liveFaceB64 = `data:image/jpeg;base64,${Buffer.from(refBytes).toString('base64')}`;
       } else {
         // Single-frame path (straight face, no head turns): quality/liveness gate.
