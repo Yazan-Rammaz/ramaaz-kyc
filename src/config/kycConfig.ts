@@ -461,12 +461,11 @@ export const faceConfig = {
     },
 
     // ── Attempt limits ────────────────────────────────────────────────────────
-    attempts: {
-        /** Maximum failures per challenge before redirecting to contact-support. */
-        maxPerChallenge: 3,
-        /** How many times the final-capture loop retries before giving up. */
-        finalCaptureRetries: 3,
-    },
+    // Deliberately absent, and nothing in this Worker has ever enforced one.
+    // The Worker's job is to answer "is this frame live?" per call; counting how
+    // many times someone may ask is the NestJS backend's decision alone. Do not
+    // reintroduce a cap here — it would be invisible to the service that owns
+    // the policy and would silently disagree with it.
 
     // ── Selfie crop padding (server-side Sharp) ───────────────────────────────
     cropping: {
