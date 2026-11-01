@@ -64,9 +64,32 @@ async function translateArabicTextToEnglish(text: string): Promise<string | unde
         });
 
         if (!response.ok) {
-            console.warn(
-                '[aiTranslateData] OpenAI translation request failed with status',
-                response.status,
+            /*
+              The BODY, not just the status — and at error level.
+
+              Every failure here ends the same way: `return undefined`, the
+              caller keeps the Arabic, and the KYC result looks like the
+              translator was never switched on. That silence is deliberate (a
+              transliteration is not worth failing an identity check over) but
+              it means this log line is the ONLY evidence that anything went
+              wrong, and a bare status code cannot tell apart the three things
+              that actually happen: 401 a revoked or wrong key, 429 no quota or
+              rate limit, 404 a model name this account cannot reach.
+
+              Those have completely different fixes and identical symptoms, so
+              the body is worth the bytes. OpenAI returns a small JSON error
+              object with a human-readable `message`; it is truncated here
+              because a runaway HTML error page should not flood the tail.
+
+              Safe to log: this is OpenAI's response, not our request — the key
+              is never echoed back in it.
+            */
+            const detail = await response.text().catch(() => '<unreadable>');
+            console.error(
+                '[aiTranslateData] OpenAI translation failed —',
+                `status=${response.status}`,
+                `model=${OPENAI_TRANSLATION_MODEL}`,
+                `body=${detail.slice(0, 300)}`,
             );
             return undefined;
         }

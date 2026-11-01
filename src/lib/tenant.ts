@@ -68,6 +68,28 @@ export type TenantConfig = {
    * has no Amplify streaming UI and single-frame is all it can send.
    */
   allowSingleFrameFace: boolean;
+  /**
+   * Does this tenant's step-scoped commit (`/kyc/reverify/step/commit`) accept
+   * `faceCapturedPhoto` — the judged face, so the backend can store it?
+   *
+   * ── Why it is opt-in ────────────────────────────────────────────────────
+   * The field was added for root and sent to EVERY tenant. RDB's NestJS
+   * validates that DTO with `forbidNonWhitelisted`, so the unknown field turned
+   * every mid-login reset-passcode face check into a 400 — and a ~300KB body
+   * against a default body limit could 413 before validation even ran.
+   * Same contract, one optional field: the backend that asked for it gets it.
+   */
+  commitFaceImage: boolean;
+  /**
+   * Does this tenant's `/kyc/submit` accept `nationalityCountry` — the country
+   * NAME as the extractor read it, the fallback when no ISO3 code was found?
+   *
+   * Opt-in for the same reason as `commitFaceImage`: RDB's submit DTO is
+   * validated with `forbidNonWhitelisted` and answers the unknown field with
+   * 400 "property nationalityCountry should not exist", failing every
+   * enrolment at the last step.
+   */
+  submitCountryName: boolean;
 };
 
 /** The shape of one entry in the `TENANTS` JSON var. Secrets are NOT in here. */
@@ -77,6 +99,10 @@ type TenantVar = {
   origins?: string[];
   /** See `allowSingleFrameFace` on TenantConfig. Absent means NOT allowed. */
   allowSingleFrameFace?: boolean;
+  /** See `commitFaceImage` on TenantConfig. Absent means NOT sent. */
+  commitFaceImage?: boolean;
+  /** See `submitCountryName` on TenantConfig. Absent means NOT sent. */
+  submitCountryName?: boolean;
 };
 
 /**
@@ -255,6 +281,8 @@ export function resolveTenant(c: TenantSource): TenantConfig {
     // `=== true`, not `??` — a missing, null or truthy-but-not-true value must
     // read as "no", never as "yes". This is a security grant.
     allowSingleFrameFace: entry.allowSingleFrameFace === true,
+    commitFaceImage: entry.commitFaceImage === true,
+    submitCountryName: entry.submitCountryName === true,
   };
 }
 

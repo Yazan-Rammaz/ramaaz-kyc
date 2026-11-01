@@ -318,7 +318,28 @@ kycRoutes.post('/liveness-credentials', async (c) => {
     headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': c.get('tenant').internalSecret },
     body: JSON.stringify({ userId: currentUserId }),
   });
-  if (!validateRes.ok) return c.json({ error: 'Invalid or expired KYC session' }, 401);
+  if (!validateRes.ok) {
+    // The client only ever sees one message (it must not learn whether a
+    // session id is real), so name the cause here, where only operators read
+    // it: 403 = X-Internal-Secret does not match the tenant backend, 404 = no
+    // such endpoint/session, 400/401 = expired, consumed, or a userId mismatch.
+    const detail = (await validateRes.text().catch(() => '')).slice(0, 200);
+    console.warn(
+      `[liveness-credentials] validate → ${validateRes.status} for session ${kycSessionId}` +
+        ` (tenant ${c.get('tenant').id}, user ${currentUserId}): ${detail}`,
+    );
+    return c.json({ error: 'Invalid or expired KYC session' }, 401);
+  }
+  // A refused session can come back as 200 `{ valid: false, reason }`, so the
+  // status alone is not a yes. Same rule as validateChallenge below.
+  const verdict = (await validateRes.json().catch(() => ({}))) as { valid?: boolean; reason?: string };
+  if (verdict.valid === false) {
+    console.warn(
+      `[liveness-credentials] validate refused session ${kycSessionId}` +
+        ` (tenant ${c.get('tenant').id}, user ${currentUserId}): ${verdict.reason ?? 'no reason'}`,
+    );
+    return c.json({ error: 'Invalid or expired KYC session' }, 401);
+  }
 
   return livenessCredentials(c);
 });
@@ -526,10 +547,13 @@ kycRoutes.post('/compare-face', async (c) => {
   if (!useMock) {
     try {
       const { compareFaces } = await import('../services/kyc/realKycService');
-      const result = await compareFaces(body.idFaceImageData, body.selfieImageData, compareConfig.similarity.passThreshold);
+      // Measure only — never judge. SimilarityThreshold 0 makes AWS report the
+      // real score however low, and the tenant backend applies its own
+      // KYC_MIN_FACE_MATCH to the `selfieVsIdScore` on the submit. A floor here
+      // would only ever disagree with it.
+      const result = await compareFaces(body.idFaceImageData, body.selfieImageData, 0);
       if (!result.sourceFaceDetected || !result.targetFaceDetected) return c.json({ status: 'error', code: 'FACE_NOT_DETECTED', message: result.sourceFaceDetected ? 'No face detected in the selfie.' : 'No face detected on the ID.' });
-      if (result.similarity >= compareConfig.similarity.passThreshold) return c.json({ status: 'success', matchScore: result.similarity, message: 'Face matched successfully.' });
-      return c.json({ status: 'error', code: 'FACE_MISMATCH', message: 'Face does not match the ID. Please try again.' });
+      return c.json({ status: 'success', matchScore: result.similarity, message: 'Face compared.' });
     } catch (err) {
       // AWS Rekognition CompareFaces throws (rather than returning) in several
       // cases — most commonly when the SOURCE image (the ID photo) has no
@@ -1013,7 +1037,8 @@ kycRoutes.post('/reverify/verify', async (c) => {
 
       // 3. Compare (source = enrolled selfie, target = live face).
       const { compareFaces } = await import('../services/kyc/realKycService');
-      const cmp = await compareFaces(enrolledSelfieB64, liveFaceB64, compareConfig.similarity.awsFilterFloor);
+      // Threshold 0: report the real score; NestJS applies KYC_REVERIFY_MIN_FACE_MATCH.
+      const cmp = await compareFaces(enrolledSelfieB64, liveFaceB64, 0);
       if (!cmp.sourceFaceDetected || !cmp.targetFaceDetected) {
         return c.json({ status: 'error', code: 'FACE_NOT_DETECTED', message: 'Face not detected in one of the images.' });
       }
@@ -1060,7 +1085,9 @@ kycRoutes.post('/reverify/verify', async (c) => {
              * travel through this Worker (see `enroll`). Adds ~200-400KB to a
              * request that was 78 bytes.
              */
-            faceCapturedPhoto: liveFaceB64 || undefined,
+            // Only for tenants that opted in — see `commitFaceImage` in
+            // lib/tenant.ts. RDB's DTO rejects the unknown field outright.
+            faceCapturedPhoto: c.get('tenant').commitFaceImage ? liveFaceB64 || undefined : undefined,
             timestamp: Math.floor(Date.now() / 1000),
             nonce: crypto.randomUUID(),
           }
@@ -1114,7 +1141,7 @@ kycRoutes.post('/submit', async (c) => {
     // country table actually lives. New backends should read
     // `nationalityCountryIso3` (unambiguous, and what the extractor computed)
     // and fall back to `nationalityCountry` when no code was determined.
-    const nestPayload = { kycSessionId: parsed.kycSessionId, fullName: parsed.extracted['name'] ?? '', nationalityCountryId, nationalityCountryIso3: parsed.extracted['countryIso3'], nationalityCountry: parsed.extracted['country'], documentType: mapDocumentType(parsed.extracted['idType']), documentFrontImageUrl: frontUrl, documentBackImageUrl: backUrl, selfieImageUrl: selfieUrl, nationalIdNumber: parsed.extracted['nationalNumber'] ?? parsed.extracted['documentNumber'] ?? '', selfieVsIdScore: parsed.selfieVsIdScore, livenessConfidence: parsed.livenessConfidence, documentExpiryDate: parsed.extracted['expiryDate'] };
+    const nestPayload = { kycSessionId: parsed.kycSessionId, fullName: parsed.extracted['name'] ?? '', nationalityCountryId, nationalityCountryIso3: parsed.extracted['countryIso3'], nationalityCountry: c.get('tenant').submitCountryName ? parsed.extracted['country'] : undefined, documentType: mapDocumentType(parsed.extracted['idType']), documentFrontImageUrl: frontUrl, documentBackImageUrl: backUrl, selfieImageUrl: selfieUrl, nationalIdNumber: parsed.extracted['nationalNumber'] ?? parsed.extracted['documentNumber'] ?? '', selfieVsIdScore: parsed.selfieVsIdScore, livenessConfidence: parsed.livenessConfidence, documentExpiryDate: parsed.extracted['expiryDate'] };
     const submitRes = await postSignedToNest(c.get('tenant').baseUrl, '/kyc/submit', nestPayload, token, c.get('tenant').sharedSecret);
     const responseText = await submitRes.text();
     if (!submitRes.ok) return c.json({ error: 'Verification backend rejected the submission.', detail: responseText }, submitRes.status >= 500 ? 502 : submitRes.status as 400);
