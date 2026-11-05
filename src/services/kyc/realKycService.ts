@@ -216,6 +216,20 @@ export function classifySide(opts: {
     return 'unknown';
 }
 
+/**
+ * Which fields a parse filled — the loggable shape of a parse result.
+ *
+ * Logs go to Workers Observability, so they never carry a value read off the
+ * card (name, numbers, dates, OCR lines, barcode text): which fields were
+ * found is what debugging a rejection needs, not what they said.
+ */
+function presentFields(o: object): string {
+    const keys = Object.entries(o)
+        .filter(([, v]) => v !== undefined && v !== null && v !== '' && typeof v !== 'boolean')
+        .map(([k]) => k);
+    return keys.length ? keys.join(',') : '(none)';
+}
+
 /** True when the rawText contains an MRZ chevron run (`<<<<<` …). */
 function hasMrzChevrons(rawText: string | undefined): boolean {
     if (!rawText) return false;
@@ -1167,7 +1181,7 @@ export async function analyzeIdDocument(
             fieldScores
                 .map(
                     (f) =>
-                        `    ${f.pass ? '✓' : '✗'} ${f.field.padEnd(15)} value="${f.value}"  confidence=${f.confidence}%`,
+                        `    ${f.pass ? '✓' : '✗'} ${f.field.padEnd(15)} ${f.value === '(missing)' ? 'missing' : 'read   '}  confidence=${f.confidence}%`,
                 )
                 .join('\n') +
             (bypassValidation ? '\n  ⚠ BYPASS_STRICT_VALIDATION=true — skipping rejection' : ''),
@@ -1198,7 +1212,7 @@ export async function analyzeIdDocument(
             const mergedLines = Array.from(new Set([...textractLines, ...detectedLines]));
 
             console.log(
-                `[realKycService] Rekognition lines (${detectedLines.length}):\n  ${mergedLines.join('\n  ')}`,
+                `[realKycService] Rekognition lines: ${detectedLines.length} (${mergedLines.length} after merge)`,
             );
 
             // ── MRZ Passport rescue ──────────────────────────────────────────
@@ -1307,7 +1321,7 @@ export async function analyzeIdDocument(
                 // (Rekognition LINE boxes → union → sharp.extract) since we
                 // already have it computed.
                 const parsed = parseTurkishId(mergedLines);
-                console.log('[realKycService] Turkish parser output:', parsed);
+                console.log('[realKycService] Turkish parser fields:', presentFields(parsed));
 
                 const recoveredFront = [
                     parsed.firstName ?? parsed.lastName,
@@ -1467,10 +1481,17 @@ export async function analyzeIdDocument(
                 );
             } else if (looksLikeSyrianId(mergedLines)) {
                 const parsed = parseSyrianId(mergedLines);
-                if (parsed.name) {
+                // Translate the parts and rebuild `name` from them, so the
+                // full name always equals first + last as the summary shows it.
+                if (parsed.firstName)
+                    parsed.firstName = await translateNameIfArabic(parsed.firstName);
+                if (parsed.lastName) parsed.lastName = await translateNameIfArabic(parsed.lastName);
+                if (parsed.firstName && parsed.lastName) {
+                    parsed.name = `${parsed.firstName} ${parsed.lastName}`;
+                } else if (parsed.name) {
                     parsed.name = await translateNameIfArabic(parsed.name);
                 }
-                console.log('[realKycService] Syrian parser output:', parsed);
+                console.log('[realKycService] Syrian parser fields:', presentFields(parsed));
 
                 // Front side: require ≥2 of 3 (national number, name, dob)
                 // — those are the legally meaningful identity fields.
@@ -1618,18 +1639,7 @@ export async function analyzeIdDocument(
                                         : '✗ differ (edit dist checked in verifier)'
                                     : '— cannot compare';
                             console.log(
-                                '[realKycService] ── Syrian back barcode ──────────────────────\n' +
-                                    '  raw text      : ' +
-                                    barcodeText +
-                                    '\n' +
-                                    '  nationalNumber : ' +
-                                    (syrianBackNatNum ?? '(not found)') +
-                                    '\n' +
-                                    '  front natNum   : ' +
-                                    (parsed.nationalNumber ?? '(not on front)') +
-                                    '\n' +
-                                    '  match          : ' +
-                                    syrMatch,
+                                `[realKycService] Syrian back barcode: nationalNumber ${syrianBackNatNum ? 'found' : 'not found'}, match ${syrMatch}`,
                             );
                         } else {
                             console.log('[realKycService] Syrian back barcode: no barcode decoded');
@@ -1643,6 +1653,8 @@ export async function analyzeIdDocument(
                                   idName: 'Syrian National ID',
                                   country: 'Syria',
                                   name: parsed.name,
+                                  firstName: parsed.firstName,
+                                  lastName: parsed.lastName,
                                   nationalNumber: parsed.nationalNumber,
                                   documentNumber: parsed.nationalNumber,
                                   birthday: parsed.birthday,
@@ -1675,7 +1687,7 @@ export async function analyzeIdDocument(
                     parsed.firstName = await translateNameIfArabic(parsed.firstName);
                 if (parsed.lastName) parsed.lastName = await translateNameIfArabic(parsed.lastName);
                 if (parsed.name) parsed.name = await translateNameIfArabic(parsed.name);
-                console.log('[realKycService] Lebanese parser output:', parsed);
+                console.log('[realKycService] Lebanese parser fields:', presentFields(parsed));
 
                 const recoveredLb = [
                     parsed.firstName ?? parsed.lastName,
@@ -1799,18 +1811,7 @@ export async function analyzeIdDocument(
                                         : '✗ differ (edit dist checked in verifier)'
                                     : '— cannot compare';
                             console.log(
-                                '[realKycService] ── Lebanese back barcode ─────────────────────\n' +
-                                    '  raw text      : ' +
-                                    barcodeText +
-                                    '\n' +
-                                    '  nationalNumber : ' +
-                                    (lbBackNatNum ?? '(not found)') +
-                                    '\n' +
-                                    '  front natNum   : ' +
-                                    (parsed.nationalNumber ?? '(not on front)') +
-                                    '\n' +
-                                    '  match          : ' +
-                                    lbMatch,
+                                `[realKycService] Lebanese back barcode: nationalNumber ${lbBackNatNum ? 'found' : 'not found'}, match ${lbMatch}`,
                             );
                         } else {
                             console.log(
@@ -2037,9 +2038,7 @@ export async function analyzeIdDocument(
             if (barcodeText) {
                 const natNum = extractNatNumFromBarcodeText(barcodeText);
                 console.log(
-                    '[realKycService] ── General back barcode (Textract path) ──────────\n' +
-                        `  raw text      : ${barcodeText}\n` +
-                        `  nationalNumber : ${natNum ?? '(not found in barcode)'}`,
+                    `[realKycService] General back barcode (Textract path): nationalNumber ${natNum ? 'found' : 'not found'}`,
                 );
                 if (natNum) {
                     extracted.nationalNumber = natNum;

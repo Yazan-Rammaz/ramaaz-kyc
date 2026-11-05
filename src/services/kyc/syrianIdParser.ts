@@ -79,6 +79,10 @@ function valueAfterSeparator(line: string): string {
 export interface SyrianIdFields {
     nationalNumber?: string;
     name?: string;
+    /** From the الاسم cue only — never guessed from the generic fallback line. */
+    firstName?: string;
+    /** From the النسبة cue only. */
+    lastName?: string;
     birthday?: string;
     /** True if all 3 required fields (name, nationalNumber, birthday) were extracted. */
     hasMinimumFields: boolean;
@@ -202,6 +206,8 @@ export function parseSyrianId(rawLines: string[]): SyrianIdFields {
     return {
         nationalNumber,
         name,
+        firstName,
+        lastName,
         birthday,
         hasMinimumFields: presentFields >= 3,
     };

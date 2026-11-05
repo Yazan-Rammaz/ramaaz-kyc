@@ -284,7 +284,6 @@ export function parseTurkishId(rawLines: string[]): TurkishIdFields {
             if (!val || /\d/.test(val) || looksLikeLabel(val) || GENDER_VALUE.test(val)) continue;
             pureTextLines.push(val);
         }
-        console.log('Pure text lines under national number:', pureTextLines);
         // pureTextLines[0] = surname, pureTextLines[1] = given name
         if (pureTextLines.length > 0) {
             lastName = pureTextLines[0];

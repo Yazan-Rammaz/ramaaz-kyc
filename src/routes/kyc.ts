@@ -6,8 +6,9 @@ import { backendFetch } from '../lib/backendFetch';
 import { getOpenAI } from '../lib/openai';
 import { postSignedToNest, patchSignedToNest } from '../lib/kycSigning';
 import { compareConfig, faceConfig, idConfig } from '../config/kycConfig';
-import type { AnalyzeIdResult, AnalyzeIdCode } from '../services/kyc/kycService.interface';
+import type { AnalyzeIdResult, AnalyzeIdCode, MissingField } from '../services/kyc/kycService.interface';
 import { resolveTenant, TenantNotConfiguredError, type TenantConfig } from '../lib/tenant';
+import { parseBackMrz } from '../services/kyc/backMrz';
 
 export const kycRoutes = new Hono<{
   Bindings: Env;
@@ -50,8 +51,12 @@ function accessToken(c: Context<{ Bindings: Env; Variables: { tenant: TenantConf
 }
 
 // ── POST /api/kyc/analyze-id ─────────────────────────────────────────────────
-const CRITICAL_FIELDS = ['FIRST_NAME', 'DATE_OF_BIRTH', 'DOCUMENT_NUMBER'] as const;
-type CriticalField = (typeof CRITICAL_FIELDS)[number];
+// Both name parts are required, each read on its own: a summary showing only
+// the first name lets the user confirm a partial identity, which then fails at
+// review or lands on the account. The combined `name` is no substitute — it
+// can be a single OCR'd line.
+const CRITICAL_FIELDS: readonly MissingField[] = ['firstName', 'lastName', 'birthday', 'documentNumber'];
+const PASSPORT_CRITICAL_FIELDS: readonly MissingField[] = ['firstName', 'lastName', 'birthday'];
 const pollCounters = new Map<string, number>();
 
 kycRoutes.post('/analyze-id', async (c) => {
@@ -79,23 +84,29 @@ kycRoutes.post('/analyze-id', async (c) => {
       }
 
       const cropped = result.croppedImageData ?? imageData;
-      const ext = result.extracted ?? {};
+      // `rawText` and `detectedFields` are every line OCR'd off the card. They
+      // are read here and never sent: no client needs them, and anything in a
+      // response ends up in the browser's devtools and network logs.
+      const { rawText, detectedFields: _df, ...ext } = result.extracted ?? {};
 
       if (side === 'front') {
-        const { detectedFields: _df, ...extStrings } = ext;
-        const policy = validateAgainstPolicy(extStrings as Record<string, string | undefined>, ext.idType);
+        const policy = validateAgainstPolicy(ext as Record<string, string | undefined>, ext.idType);
         if (!policy.accepted) {
-          return c.json({ status: 'error', code: 'MISSING_CRITICAL_DATA', message: 'ID not clearly readable. Hold the card flat, well-lit, and try again.', side: 'front', found: false } satisfies AnalyzeIdResult);
+          return c.json({ status: 'error', code: 'MISSING_CRITICAL_DATA', message: missingFieldsMessage(policy.missingFields), missingFields: policy.missingFields, side: 'front', found: false } satisfies AnalyzeIdResult);
         }
         const isPassport = (ext.idType ?? '').toLowerCase().includes('passport');
-        const extractedData: AnalyzeIdResult['extractedData'] = { idType: ext.idType ?? '', idName: ext.idType ?? '', country: ext.country ?? '', countryIso3: ext.countryIso3, name: ext.name ?? '', nationalNumber: ext.nationalNumber ?? '', birthday: ext.birthday ?? '', firstName: ext.firstName, lastName: ext.lastName, documentNumber: isPassport ? ext.passportNumber : ext.documentNumber, expiryDate: ext.expiryDate, rawText: ext.rawText };
+        const extractedData: AnalyzeIdResult['extractedData'] = { idType: ext.idType ?? '', idName: ext.idType ?? '', country: ext.country ?? '', countryIso3: ext.countryIso3, name: ext.name ?? '', nationalNumber: ext.nationalNumber ?? '', birthday: ext.birthday ?? '', firstName: ext.firstName, lastName: ext.lastName, documentNumber: isPassport ? ext.passportNumber : ext.documentNumber, expiryDate: ext.expiryDate };
         return c.json({ status: 'success', nextStep: isPassport ? 'COMPLETE' : 'REQUIRE_BACK', croppedImageData: cropped, idFaceImageData: result.idFaceImageData, side: 'front', extracted: ext, extractedData, found: true } satisfies AnalyzeIdResult);
       }
 
-      const rawBack = ext.rawText ?? '';
+      const rawBack = rawText ?? '';
       const hasContent = /<{5,}/.test(rawBack) || !!ext.address || !!ext.documentNumber || !!ext.nationalNumber || rawBack.length >= 30;
       if (!hasContent) return c.json({ status: 'error', code: 'MISSING_CRITICAL_DATA', message: 'ID not clearly readable. Hold the card flat, well-lit, and try again.', side: 'back', found: false } satisfies AnalyzeIdResult);
-      return c.json({ status: 'success', nextStep: 'COMPLETE', croppedImageData: cropped, side: 'back', extracted: ext, extractedData: { idType: ext.idType ?? '', idName: ext.idType ?? '', country: ext.country ?? '', countryIso3: ext.countryIso3, name: ext.name ?? '', nationalNumber: ext.nationalNumber ?? '', birthday: ext.birthday ?? '', firstName: ext.firstName, lastName: ext.lastName, documentNumber: ext.documentNumber, expiryDate: ext.expiryDate, rawText: ext.rawText }, found: true } satisfies AnalyzeIdResult);
+      // The client matches the back to the front on these three; it used to
+      // parse them from `rawText` itself when the structured field was absent.
+      const mrz = parseBackMrz(rawBack);
+      const back = { ...ext, nationalNumber: ext.nationalNumber ?? mrz.nationalNumber, documentNumber: ext.documentNumber ?? mrz.documentNumber, lastName: ext.lastName ?? mrz.lastName };
+      return c.json({ status: 'success', nextStep: 'COMPLETE', croppedImageData: cropped, side: 'back', extracted: back, extractedData: { idType: back.idType ?? '', idName: back.idType ?? '', country: back.country ?? '', countryIso3: back.countryIso3, name: back.name ?? '', nationalNumber: back.nationalNumber ?? '', birthday: back.birthday ?? '', firstName: back.firstName, lastName: back.lastName, documentNumber: back.documentNumber, expiryDate: back.expiryDate }, found: true } satisfies AnalyzeIdResult);
     } catch (err) {
       console.error('[analyze-id] AWS failure:', err);
       return c.json({ error: 'analyze-id failed', detail: String(err) }, 500);
@@ -114,11 +125,20 @@ kycRoutes.post('/analyze-id', async (c) => {
 });
 
 function validateAgainstPolicy(extracted: Record<string, string | undefined>, idType?: string) {
-  const fieldMap: Record<CriticalField, string | undefined> = { FIRST_NAME: extracted['firstName'] ?? extracted['name'], DATE_OF_BIRTH: extracted['birthday'], DOCUMENT_NUMBER: extracted['documentNumber'] ?? extracted['nationalNumber'] };
-  const missingFields = CRITICAL_FIELDS.filter((k) => !fieldMap[k]?.trim());
+  const fieldMap: Record<MissingField, string | undefined> = { firstName: extracted['firstName'], lastName: extracted['lastName'], birthday: extracted['birthday'], documentNumber: extracted['documentNumber'] ?? extracted['nationalNumber'] };
   const isPassport = (idType ?? '').toLowerCase().includes('passport');
-  if (isPassport) return { accepted: (['FIRST_NAME', 'DATE_OF_BIRTH'] as CriticalField[]).every((k) => fieldMap[k]?.trim()), missingFields };
+  const required = isPassport ? PASSPORT_CRITICAL_FIELDS : CRITICAL_FIELDS;
+  const missingFields = required.filter((k) => !fieldMap[k]?.trim());
   return { accepted: missingFields.length === 0, missingFields };
+}
+
+const MISSING_FIELD_LABEL: Record<MissingField, string> = { firstName: 'first name', lastName: 'last name', birthday: 'date of birth', documentNumber: 'ID number' };
+
+/** English fallback only — clients should branch on `missingFields`, not on this text. */
+function missingFieldsMessage(missing: readonly MissingField[]): string {
+  const namePart = missing.includes('firstName') || missing.includes('lastName') ? ['full name'] : [];
+  const rest = missing.filter((f) => f !== 'firstName' && f !== 'lastName').map((f) => MISSING_FIELD_LABEL[f]);
+  return `We couldn't read your ${[...namePart, ...rest].join(' and ')}. Avoid glare, keep the whole card in the frame, and try again.`;
 }
 
 function mapReasonToCode(reason: string | undefined): AnalyzeIdCode {
