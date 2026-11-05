@@ -29,6 +29,12 @@ export type AnalyzeIdCode =
     | 'SPOOFING_DETECTED';
 
 /**
+ * A required front-side field, named as it appears in `extractedData`.
+ * `documentNumber` is satisfied by either the document or national number.
+ */
+export type MissingField = 'firstName' | 'lastName' | 'birthday' | 'documentNumber';
+
+/**
  * Next UI step, present when `status === 'success'`.
  *
  * - `REQUIRE_BACK` — Front side captured; the user must now capture the back side.
@@ -46,6 +52,14 @@ export interface AnalyzeIdResult {
     /** User-facing guidance message — present when `status === 'error'`. */
     message?: string;
 
+    /**
+     * Which required fields could not be read — present with
+     * `MISSING_CRITICAL_DATA` on the front side, so the client can say
+     * exactly what to fix instead of a generic "not readable". Names match
+     * the keys of `extractedData`.
+     */
+    missingFields?: MissingField[];
+
     /** Next UI step — present when `status === 'success'`. */
     nextStep?: AnalyzeIdNextStep;
 
@@ -62,8 +76,12 @@ export interface AnalyzeIdResult {
      * Full extracted fields forwarded from `realKycService`.
      * Prefer `extractedData` for the summary UI; `extracted` is the raw
      * Partial<IDDocument> used internally.
+     *
+     * Never carries `rawText` or `detectedFields`: every line OCR'd off the
+     * card is PII and no client needs it. The back side's MRZ is parsed here
+     * instead and lands in the structured fields (see `backMrz.ts`).
      */
-    extracted?: Partial<IDDocument>;
+    extracted?: Omit<Partial<IDDocument>, 'rawText'>;
 
     /**
      * Clean 5-field payload for the confirmation UI — present when
@@ -89,7 +107,6 @@ export interface AnalyzeIdResult {
         lastName?: string;
         documentNumber?: string;
         expiryDate?: string;
-        rawText?: string;
     };
 
     /**

@@ -102,9 +102,20 @@ these before its backend exists:
 
 | Endpoint | Body | Returns |
 | --- | --- | --- |
-| `POST /api/kyc/analyze-id` | `{ imageData, side, sessionHint }` | `{ status, code?, extractedData? }` |
+| `POST /api/kyc/analyze-id` | `{ imageData, side, sessionHint }` | `{ status, code?, missingFields?, extractedData? }` |
 | `POST /api/kyc/liveness` | `{ faceImageData, challengeStep, crop }` | `{ isLive, faceImageData?, metrics? }` |
 | `POST /api/kyc/compare-face` | `{ selfieImageData, idFaceImageData }` | `{ status, matchScore?, message? }` |
+
+A front side is accepted only when `firstName`, `lastName`, `birthday` and
+`documentNumber` were each read (passports: all but `documentNumber`). Otherwise
+it fails with `MISSING_CRITICAL_DATA` and `missingFields` naming the gaps, e.g.
+`["lastName"]` — branch your guidance on that list and on `code`; `message` is an
+English fallback only.
+
+Responses never include the OCR text (`rawText`, `detectedFields`) — it is every
+line read off the card. On the back side, the MRZ is parsed in the Worker and
+fills `nationalNumber`, `documentNumber` and `lastName` when the card gave no
+structured value, so a front/back consistency check needs only those fields.
 
 Everything else needs your backend (§3).
 
