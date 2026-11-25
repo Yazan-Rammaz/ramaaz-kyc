@@ -27,7 +27,9 @@
  */
 
 const ARABIC_RANGE = /[\u0600-\u06FF]/;
-const ELEVEN_DIGITS = /(\d{11})/;
+// The registration number is 12 digits (e.g. ٠٠٠٠١١٣٠٧٤٣٥); taking the first 11 of
+// them dropped its last digit (2026-11-25). Twelve first, eleven for an older card.
+const ELEVEN_DIGITS = /(\d{12}|\d{11})/;
 // Lebanese dates are YYYY/MM/DD or DD/MM/YYYY in Arabic-Indic
 const DATE_FORMAT = /(\d{1,4})[./\-](\d{1,2})[./\-](\d{1,4})/;
 

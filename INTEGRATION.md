@@ -359,8 +359,7 @@ to commit results.
 No code change. One registry entry plus two secrets:
 
 ```toml
-# wrangler.toml [vars] — and repeat under [env.production.vars],
-# because Wrangler environments do NOT inherit the top-level [vars].
+# wrangler.toml [vars]
 TENANTS = '''{"rdb":{…},"yourapp":{
   "baseUrl":"https://your-backend.example.com",
   "cookies":{"access":"yourapp_at","step":"yourapp_step"},

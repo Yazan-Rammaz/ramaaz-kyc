@@ -26,7 +26,9 @@ export type AnalyzeIdCode =
     | 'INVALID_ID_TYPE'
     | 'NO_TEXT_DETECTED'
     | 'WRONG_SIDE'
-    | 'SPOOFING_DETECTED';
+    | 'SPOOFING_DETECTED'
+    /** The back shows a different person than the front (see analyze-id). */
+    | 'BACK_FACE_MISMATCH';
 
 /**
  * A required front-side field, named as it appears in `extractedData`.
