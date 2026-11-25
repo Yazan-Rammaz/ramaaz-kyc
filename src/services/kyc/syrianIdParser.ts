@@ -76,6 +76,48 @@ function valueAfterSeparator(line: string): string {
     return line.slice(sepIdx + 1).trim();
 }
 
+/*
+ * The labels printed on a Syrian ID, most specific first ("اسم و نسبة الأم"
+ * holds "نسبة", "محل و تاريخ الولادة" holds "تاريخ"). Tatweel (ـ, the stretch
+ * stroke: "النسـبة") is removed before matching.
+ */
+const FIELD_LABELS: { key: string; re: RegExp }[] = [
+    { key: 'mother', re: /اسم\s*و?\s*نسبة\s*ال[أاإ]م/g },
+    { key: 'father', re: /اسم\s*ال[أاإ]ب/g },
+    { key: 'birth', re: /محل\s*و?\s*تاريخ\s*الولادة|تاريخ\s*الولادة|محل\s*الولادة/g },
+    { key: 'national', re: /الرقم\s*الوطني/g },
+    { key: 'last', re: /النسبة/g },
+    { key: 'first', re: /الاسم/g },
+];
+const TATWEEL = /ـ/g;
+
+/** The labelled fields in one OCR line, each value ending where the next label starts. */
+function fieldSegments(line: string): { key: string; value: string }[] {
+    const text = line.replace(TATWEEL, '');
+    const hits: { key: string; start: number; end: number }[] = [];
+    for (const { key, re } of FIELD_LABELS) {
+        for (const m of text.matchAll(re)) {
+            const start = m.index ?? 0;
+            const end = start + m[0].length;
+            // A shorter label inside one already found ("نسبة" in "اسم و نسبة الأم") is not another field.
+            if (hits.some((h) => start < h.end && end > h.start)) continue;
+            hits.push({ key, start, end });
+        }
+    }
+    hits.sort((a, b) => a.start - b.start);
+    return hits.map((h, i) => ({
+        key: h.key,
+        value: stripLabels(text.slice(h.end, hits[i + 1]?.start ?? text.length)),
+    }));
+}
+
+/** A value with no label words, separators or stray punctuation left in it. */
+function stripLabels(s: string): string {
+    let v = s.replace(TATWEEL, '');
+    for (const { re } of FIELD_LABELS) v = v.replace(re, ' ');
+    return v.replace(/[:：\-–]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 export interface SyrianIdFields {
     nationalNumber?: string;
     name?: string;
@@ -90,6 +132,12 @@ export interface SyrianIdFields {
 
 /** Detect whether the raw text suggests this is likely a Syrian-style ID. */
 export function looksLikeSyrianId(rawLines: string[]): boolean {
+    // Not a Lebanese card (2026-11-25). Any three Arabic lines matched below, and a
+    // Lebanese ID has them too ("الجمهورية … وزارة الداخلية"): this check runs first,
+    // so the Syrian parser took Lebanese cards, found no Syrian fields, and the person
+    // was told their name and birth date could not be read — while the Lebanese
+    // parser, never reached, reads them.
+    if (/اللبنانية|لبنان/.test(rawLines.join(' '))) return false;
     const normalized = rawLines.map(normalizeDigits);
     const arabicLines = normalized.filter((l) => ARABIC_RANGE.test(l));
     if (arabicLines.length >= 3) return true;
@@ -110,16 +158,6 @@ export function parseSyrianId(rawLines: string[]): SyrianIdFields {
     // numerals, but keep the original line for name extraction (Arabic
     // script must remain intact).
     const normalizedLines = rawLines.map(normalizeDigits);
-
-    const extractValueOrNext = (i: number, original: string): string | undefined => {
-        const after = valueAfterSeparator(original);
-        if (after.length >= MIN_ARABIC_NAME_LENGTH) return after;
-        if (i + 1 < rawLines.length) {
-            const next = rawLines[i + 1].trim();
-            if (next.length >= MIN_ARABIC_NAME_LENGTH) return next;
-        }
-        return undefined;
-    };
 
     for (let i = 0; i < rawLines.length; i++) {
         const originalLine = rawLines[i].trim();
@@ -152,18 +190,22 @@ export function parseSyrianId(rawLines: string[]): SyrianIdFields {
             }
         }
 
-        // ── First name (الاسم) — must NOT also match النسبة on the same line.
-        if (
-            !firstName &&
-            ARABIC_FIRST_NAME_CUE.test(originalLine) &&
-            !ARABIC_LAST_NAME_CUE.test(originalLine)
-        ) {
-            firstName = extractValueOrNext(i, originalLine);
-        }
-
-        // ── Family name (النسبة).
-        if (!lastName && ARABIC_LAST_NAME_CUE.test(originalLine)) {
-            lastName = extractValueOrNext(i, originalLine);
+        // ── First name (الاسم) and family name (النسبة), by labelled segment.
+        // OCR can join two fields into one line ("الاسم: يزن النسبة: ادنوف"); each
+        // value now ends where the next label starts, and a value never carries a
+        // label word (see fieldSegments).
+        const segs = fieldSegments(originalLine);
+        for (const s of segs) {
+            if (s.key !== 'first' && s.key !== 'last') continue;
+            if (s.key === 'first' ? firstName : lastName) continue;
+            let value = s.value.length >= MIN_ARABIC_NAME_LENGTH ? s.value : undefined;
+            // Label alone on its line: the value is the next line, if that line is not a label itself.
+            if (!value && s === segs[segs.length - 1] && i + 1 < rawLines.length) {
+                const next = stripLabels(rawLines[i + 1]);
+                if (fieldSegments(rawLines[i + 1]).length === 0 && next.length >= MIN_ARABIC_NAME_LENGTH) value = next;
+            }
+            if (s.key === 'first') firstName = value;
+            else lastName = value;
         }
 
         // ── Latin "Name:" cue (rare on Syrian IDs, kept for mixed-script scans).

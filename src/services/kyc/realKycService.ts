@@ -27,6 +27,9 @@ import {
 } from '@zxing/library';
 import { idConfig, faceConfig } from '../../config/kycConfig';
 import { looksLikeSyrianId, parseSyrianId } from './syrianIdParser';
+import { fixSyrianPassport, looksLikeSyrianPassport } from './syrianPassportParser';
+import { fixExtractedNames } from './nameOcr';
+import { readBarcodeText } from './barcodeWasm';
 import { looksLikeTurkishId, parseTurkishId } from './turkishIdParser';
 import { looksLikeLebaneseId, parseLebaneseId } from './lebaneseIdParser';
 import { extractCountry } from './countryExtractor';
@@ -131,6 +134,9 @@ function arabicIndicToWestern(s: string): string {
  * Returns the decoded text, or null if no barcode was found.
  */
 async function decodeBarcodeFromBuffer(imageBuffer: Buffer): Promise<string | null> {
+    // zxing-cpp (WASM) first: the JS port below never read a real Syrian back (barcodeWasm.ts).
+    const fromWasm = await readBarcodeText(new Uint8Array(imageBuffer));
+    if (fromWasm) return fromWasm;
     const meta = getImageSize(imageBuffer);
     const w = meta.width ?? 0;
     const h = meta.height ?? 0;
@@ -187,7 +193,9 @@ async function decodeBarcodeFromBuffer(imageBuffer: Buffer): Promise<string | nu
  */
 function extractNatNumFromBarcodeText(barcodeText: string): string | undefined {
     const normalized = arabicIndicToWestern(barcodeText);
-    const match = normalized.match(/\b\d{11}\b/);
+    // 11 digits on a Syrian ID, 12 on a Lebanese one (2026-11-25): an 11-only match
+    // found no number in a Lebanese barcode, so its back was never compared.
+    const match = normalized.match(/\b(?:\d{12}|\d{11})\b/);
     return match?.[0];
 }
 
@@ -207,9 +215,17 @@ export function classifySide(opts: {
     hasMrz: boolean;
     hasAddress: boolean;
     hasDocumentNumber: boolean;
+    /**
+     * The front's own labelled fields were read — a name under الاسم / الشهرة /
+     * النسبة, printed only on the front of Syrian and Lebanese IDs (2026-11-25).
+     * Ahead of the ID number: a Lebanese front PRINTS its number, so a front shown
+     * again for the back, its face cut off, was taken for a back and accepted.
+     */
+    hasFrontLabels?: boolean;
 }): 'front' | 'back' | 'unknown' {
     if (opts.hasFace && opts.hasMrz) return 'front'; // passport photo page
     if (opts.hasFace) return 'front';
+    if (opts.hasFrontLabels) return 'front';
     if (opts.hasMrz) return 'back';
     if (opts.hasAddress) return 'back';
     if (opts.hasDocumentNumber) return 'back';
@@ -517,6 +533,8 @@ export async function compareFaces(
     idFaceBase64: string,
     liveFaceBase64: string,
     similarityThreshold: number = FACE_MATCH_SIMILARITY_THRESHOLD,
+    /** 'NONE' keeps small or soft faces AWS would otherwise drop — the portrait on an ID back. */
+    qualityFilter: 'AUTO' | 'NONE' = 'AUTO',
 ): Promise<CompareFacesResult> {
     const sourceBytes = Buffer.from(stripDataUrlPrefix(idFaceBase64), 'base64');
     const targetBytes = Buffer.from(stripDataUrlPrefix(liveFaceBase64), 'base64');
@@ -526,7 +544,7 @@ export async function compareFaces(
             SourceImage: { Bytes: sourceBytes },
             TargetImage: { Bytes: targetBytes },
             SimilarityThreshold: similarityThreshold,
-            QualityFilter: 'AUTO',
+            QualityFilter: qualityFilter,
         }),
     );
 
@@ -995,6 +1013,16 @@ export async function analyzeIdDocument(
     imageBase64: string,
     side: 'front' | 'back' = 'front',
 ): Promise<AnalyzeIdDocumentResult> {
+    // Every parser's result passes here: a name never keeps OCR look-alikes
+    // such as "$" for Ş (see nameOcr).
+    const result = await analyzeIdDocumentRaw(imageBase64, side);
+    return result.extracted ? { ...result, extracted: fixExtractedNames(result.extracted) } : result;
+}
+
+async function analyzeIdDocumentRaw(
+    imageBase64: string,
+    side: 'front' | 'back',
+): Promise<AnalyzeIdDocumentResult> {
     const cleaned = stripDataUrlPrefix(imageBase64);
     const sourceBytes = Buffer.from(cleaned, 'base64');
     // Probe original dimensions once — we'll need them for every extract.
@@ -1116,7 +1144,7 @@ export async function analyzeIdDocument(
             : docNumber
         : undefined;
 
-    const standardExtracted = {
+    const standardExtractedRaw = {
         idType: idTypeRaw,
         idName: idTypeRaw,
         country,
@@ -1133,6 +1161,14 @@ export async function analyzeIdDocument(
         address: getField(fields, 'ADDRESS'),
         rawText,
     };
+    // A Syrian passport's MRZ given name is the FATHER's, and Textract mixes the
+    // parents into the name and the issue date into the expiry: the printed fields
+    // win (see syrianPassportParser).
+    const pageLines = rawText ? rawText.split('\n') : [];
+    const standardExtracted =
+        isPassport && looksLikeSyrianPassport(pageLines, countryIso3)
+            ? fixSyrianPassport(standardExtractedRaw, pageLines)
+            : standardExtractedRaw;
 
     // Only attach detectedFields when standard fields are sparse (UNKNOWN
     // documents typically have all-undefined or all-empty AnalyzeID values).
@@ -1292,9 +1328,7 @@ export async function analyzeIdDocument(
                     }
                 })();
 
-                return {
-                    found: true,
-                    extracted: {
+                const rescued = {
                         idType: 'PASSPORT',
                         country: mrzRescue?.country ?? standardExtracted.country,
                         countryIso3: mrzRescue?.countryIso3 ?? standardExtracted.countryIso3,
@@ -1308,7 +1342,14 @@ export async function analyzeIdDocument(
                         expirationDate: standardExtracted.expirationDate,
                         expiryDate: standardExtracted.expiryDate,
                         rawText: mergedRawForMrz,
-                    },
+                };
+                return {
+                    found: true,
+                    // Same correction as the standard path: on a Syrian passport the
+                    // MRZ's given name is the father's (see syrianPassportParser).
+                    extracted: looksLikeSyrianPassport(mergedLines, rescued.countryIso3)
+                        ? fixSyrianPassport(rescued, mergedLines)
+                        : rescued,
                     croppedImageData: rescueCrop?.dataUrl,
                     documentBox: rescueCrop?.box,
                 };
@@ -1450,6 +1491,7 @@ export async function analyzeIdDocument(
                                   idType: 'turkish_national_id',
                                   idName: 'Turkish National ID',
                                   country: 'Turkey',
+                                  countryIso3: 'TUR',
                                   name: parsed.name,
                                   firstName: parsed.firstName,
                                   lastName: parsed.lastName,
@@ -1464,6 +1506,7 @@ export async function analyzeIdDocument(
                                   idType: 'turkish_national_id',
                                   idName: 'Turkish National ID',
                                   country: 'Turkey',
+                                  countryIso3: 'TUR',
                                   rawText: mergedRaw || undefined,
                               };
 
@@ -1615,6 +1658,7 @@ export async function analyzeIdDocument(
                         hasMrz: hasMrzChevrons(mergedRawSyr),
                         hasAddress: false,
                         hasDocumentNumber: !!parsed.nationalNumber,
+                        hasFrontLabels: !!(parsed.firstName || parsed.lastName),
                     });
                     if (detectedSide !== 'unknown' && detectedSide !== side) {
                         console.log(
@@ -1629,7 +1673,10 @@ export async function analyzeIdDocument(
                     // to extract the nationalNumber for cross-side verification.
                     let syrianBackNatNum: string | undefined;
                     if (side === 'back' && fbCroppedBuffer) {
-                        const barcodeText = await decodeBarcodeFromBuffer(fbCroppedBuffer);
+                        // The crop, then the original capture at full resolution (the crop is recompressed).
+                        const barcodeText =
+                            (await decodeBarcodeFromBuffer(fbCroppedBuffer)) ??
+                            (await readBarcodeText(new Uint8Array(sourceBytes)));
                         if (barcodeText) {
                             syrianBackNatNum = extractNatNumFromBarcodeText(barcodeText);
                             const syrMatch =
@@ -1652,6 +1699,7 @@ export async function analyzeIdDocument(
                                   idType: 'syrian_national_id',
                                   idName: 'Syrian National ID',
                                   country: 'Syria',
+                                  countryIso3: 'SYR',
                                   name: parsed.name,
                                   firstName: parsed.firstName,
                                   lastName: parsed.lastName,
@@ -1664,6 +1712,7 @@ export async function analyzeIdDocument(
                                   idType: 'syrian_national_id',
                                   idName: 'Syrian National ID',
                                   country: 'Syria',
+                                  countryIso3: 'SYR',
                                   nationalNumber: syrianBackNatNum, // from barcode — used by backSideVerifier
                                   rawText: mergedRawSyr || undefined,
                               };
@@ -1801,7 +1850,10 @@ export async function analyzeIdDocument(
                     // ── Barcode decode on back (PDF417 contains national number) ─
                     let lbBackNatNum: string | undefined;
                     if (side === 'back' && fbCroppedBuffer) {
-                        const barcodeText = await decodeBarcodeFromBuffer(fbCroppedBuffer);
+                        // The crop, then the original capture at full resolution (the crop is recompressed).
+                        const barcodeText =
+                            (await decodeBarcodeFromBuffer(fbCroppedBuffer)) ??
+                            (await readBarcodeText(new Uint8Array(sourceBytes)));
                         if (barcodeText) {
                             lbBackNatNum = extractNatNumFromBarcodeText(barcodeText);
                             const lbMatch =
@@ -1827,6 +1879,7 @@ export async function analyzeIdDocument(
                         hasMrz: hasMrzChevrons(mergedRawLb),
                         hasAddress: false,
                         hasDocumentNumber: !!parsed.nationalNumber,
+                        hasFrontLabels: !!(parsed.firstName || parsed.lastName),
                     });
                     if (detectedSide !== 'unknown' && detectedSide !== side) {
                         console.log(
@@ -1841,6 +1894,7 @@ export async function analyzeIdDocument(
                                   idType: 'lebanese_national_id',
                                   idName: 'Lebanese National ID',
                                   country: 'Lebanon',
+                                  countryIso3: 'LBN',
                                   name: parsed.name,
                                   firstName: parsed.firstName,
                                   lastName: parsed.lastName,
@@ -1853,6 +1907,7 @@ export async function analyzeIdDocument(
                                   idType: 'lebanese_national_id',
                                   idName: 'Lebanese National ID',
                                   country: 'Lebanon',
+                                  countryIso3: 'LBN',
                                   nationalNumber: lbBackNatNum,
                                   rawText: mergedRawLb || undefined,
                               };
@@ -2034,7 +2089,8 @@ export async function analyzeIdDocument(
     if (side === 'back' && !extracted.nationalNumber && croppedImageData) {
         try {
             const croppedBuffer = Buffer.from(stripDataUrlPrefix(croppedImageData), 'base64');
-            const barcodeText = await decodeBarcodeFromBuffer(croppedBuffer);
+            const barcodeText =
+                (await decodeBarcodeFromBuffer(croppedBuffer)) ?? (await readBarcodeText(new Uint8Array(sourceBytes)));
             if (barcodeText) {
                 const natNum = extractNatNumFromBarcodeText(barcodeText);
                 console.log(
