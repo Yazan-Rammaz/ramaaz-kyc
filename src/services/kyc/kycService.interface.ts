@@ -28,7 +28,9 @@ export type AnalyzeIdCode =
     | 'WRONG_SIDE'
     | 'SPOOFING_DETECTED'
     /** The back shows a different person than the front (see analyze-id). */
-    | 'BACK_FACE_MISMATCH';
+    | 'BACK_FACE_MISMATCH'
+    /** A Syrian back where no portrait could be found — required there (see analyze-id). */
+    | 'BACK_PHOTO_UNCLEAR';
 
 /**
  * A required front-side field, named as it appears in `extractedData`.

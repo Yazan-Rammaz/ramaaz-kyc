@@ -112,28 +112,37 @@ kycRoutes.post('/analyze-id', async (c) => {
       // blurred, so only a clear mismatch (a face found, under BACK_FACE_MIN
       // similarity) refuses; two different people score far below it. A back
       // with no face (Lebanese, Turkish) is not checked.
+      // The back's issuing country, so the client can refuse a back from another
+      // country's card — a Syrian back has nothing else to compare (backCountry.ts).
+      const { backCountryIso3, ISO3_COUNTRY } = await import('../services/kyc/backCountry');
+      const backIso = ext.countryIso3 ?? backCountryIso3(rawBack);
       if (frontFaceImageData) {
+        // A Syrian back's portrait is REQUIRED (2026-11-25): it is the only thing that
+        // ties it to its front, so a back where none is found is not accepted — a
+        // glare over it would otherwise let another person's back through.
+        const portraitRequired = backIso === 'SYR';
+        let faceFound = false;
         try {
           const { compareFaces } = await import('../services/kyc/realKycService');
           // Quality filter OFF: with AUTO, AWS dropped the tiny back portrait every time
           // ("face not found"). Measured off: same person 95, different people 0–2.
           const cmp = await compareFaces(frontFaceImageData, cropped, 0, 'NONE');
+          faceFound = cmp.targetFaceDetected;
           console.log(`[analyze-id] back portrait: face ${cmp.targetFaceDetected ? 'found' : 'not found'}, similarity ${Math.round(cmp.similarity)}`);
           if (cmp.targetFaceDetected && cmp.similarity < BACK_FACE_MIN) {
-            return c.json({ status: 'error', code: 'BACK_FACE_MISMATCH' as AnalyzeIdCode, message: 'This back belongs to a different ID. Please use the back of the same document.', side: 'back', found: false } satisfies AnalyzeIdResult);
+            return c.json({ status: 'error', code: 'BACK_FACE_MISMATCH' as AnalyzeIdCode, message: 'This back belongs to a different ID. Use the back of the same document.', side: 'back', found: false } satisfies AnalyzeIdResult);
           }
         } catch (err) {
-          // No face AWS can use on either image: nothing to compare, as before.
+          // No face AWS can use on either image: nothing to compare.
           console.log('[analyze-id] back portrait: not comparable —', err instanceof Error ? err.name : String(err));
+        }
+        if (portraitRequired && !faceFound) {
+          return c.json({ status: 'error', code: 'BACK_PHOTO_UNCLEAR' as AnalyzeIdCode, message: "We couldn't see the small photo on the back. Avoid glare on it and try again.", side: 'back', found: false } satisfies AnalyzeIdResult);
         }
       }
       // The client matches the back to the front on these three; it used to
       // parse them from `rawText` itself when the structured field was absent.
       const mrz = parseBackMrz(rawBack);
-      // The back's issuing country, so the client can refuse a back from another
-      // country's card — a Syrian back has nothing else to compare (backCountry.ts).
-      const { backCountryIso3, ISO3_COUNTRY } = await import('../services/kyc/backCountry');
-      const backIso = ext.countryIso3 ?? backCountryIso3(rawBack);
       const back = { ...ext, countryIso3: backIso, country: ext.country ?? (backIso ? ISO3_COUNTRY[backIso] : undefined), nationalNumber: ext.nationalNumber ?? mrz.nationalNumber, documentNumber: ext.documentNumber ?? mrz.documentNumber, lastName: ext.lastName ?? mrz.lastName };
       console.log(`[analyze-id] back side country: ${backIso ?? 'unknown'}`);
       return c.json({ status: 'success', nextStep: 'COMPLETE', croppedImageData: cropped, side: 'back', extracted: back, extractedData: { idType: back.idType ?? '', idName: back.idType ?? '', country: back.country ?? '', countryIso3: back.countryIso3, name: back.name ?? '', nationalNumber: back.nationalNumber ?? '', birthday: back.birthday ?? '', firstName: back.firstName, lastName: back.lastName, documentNumber: back.documentNumber, expiryDate: back.expiryDate }, found: true } satisfies AnalyzeIdResult);
